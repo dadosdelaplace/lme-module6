@@ -1,0 +1,2782 @@
+---
+title: "Linear Mixed Models in Practice"
+subtitle: "PHTH 7440 · Northeastern University"
+author: "Javier Álvarez Liébana"
+format:
+  revealjs:
+    theme: [default, theme.scss]
+    css: extra.css
+    bibliography: references.bib
+    l"#1d2b30"-citations: true
+    include-in-header: fonts.html
+    slide-number: c/t
+    width: 1280
+    height: 760
+    margin: 0.08
+    center-title-slide: true
+    transition: fade
+    transition-speed: fast
+    history: false
+    progress: true
+    chalkboard: false
+    l"#1d2b30"-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+  # cache: true
+knitr:
+  opts_chunk:
+    comment: "#>"
+    fig-dpi: 150
+    fig-width: 10
+    fig-height: 5
+    out-width: "100%"
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| cache: false
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(ggeffects)
+library(performance)
+library(see)
+library(pbkrtest)
+library(patchwork)
+
+options(width = 72, digits = 4)
+
+# palette from the slide theme
+ink <- "#1d2b30"; fact <- "#2a9d8f"; counter <- "#e76f51"; ghost <- "#c98a14"; muted <- "#6b7280"
+pal_diet <- c("1" = "#1d2b30", "2" = ghost, "3" = "#2a9d8f", "4" = counter)
+
+theme_set(
+  theme_minimal(base_size = 15) +
+    theme(panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          plot.title = element_text(face = "bold", color = "#1d2b30"),
+          strip.text = element_text(face = "bold"))
+)
+
+# data used throughout
+sleep <- sleepstudy |>
+  filter(Days >= 2) |>
+  mutate(Days = Days - 2)
+
+chicks <- as_tibble(ChickWeight) |>
+  mutate(Chick = factor(as.character(Chick)),
+         Diet  = factor(Diet))
+```
+
+## Today
+
+::: {.lead}
+You already know **the theory**: correlated measurements, covariance structures, random intercepts and slopes, conditional vs marginal means, BLUPs.
+:::
+
+. . .
+
+<p class="punch">Today: from a <span class="#2a9d8f">fitted model</span> to <span class="counter">answers</span>.</p>
+
+. . .
+
+::: {.incremental}
+1. **Look first**: why plotting comes before modelling.
+2. **Motivation** (`sleepstudy`): why a mixed model at all, seen in pictures.
+3. **One group, time only** (`sleepstudy`): `emmeans`, `ggeffects`, `performance`.
+4. **Bootstrap** (`sleepstudy`): when the formulas are not enough.
+5. **Adding a group** (`ChickWeight`): four diets, fifty chicks, 21 Days.
+6. **Group × time**: contrasts, difference curves, difference of differences.
+7. **Your turn** (`Orthodont`).
+:::
+
+---
+
+## Where we are: two things to model
+
+Every longitudinal model so far has made **two choices**: one for the **mean**, one for the **covariance**.
+
+::: {style="font-size: 0.66em"}
+
+| | **Mean** | **Covariance** | **In R** |
+|---|---|---|---|
+| Linear regression (M1–M2) | Covariates | $\sigma^2 I$: independence | `lm()` |
+| RM-ANOVA (M3) | One mean per occasion, one group | Sphericity / compound symmetry | `aov(y ~ t + Error(id/t))` |
+| Response profiles (M4) | Group × occasion (time as factor) | Unstructured | `gls(..., corSymm, varIdent)` |
+| Parametric curves (M5) | Group × $f(t)$: line, quadratic, spline | Unstructured | `gls(y ~ group * t, ...)` |
+| Covariance patterns (M6.1) | Saturated (kept fixed) | CS, AR(1), exponential… | `gls(..., corAR1 / corExp)` |
+| **Mixed models (M6.2)** | **$X\beta$ (population) + $Zb_i$ (subject)** | **Induced: $ZGZ' + \sigma^2 I$** | **`lmer(y ~ t + (1 + t | id))`** |
+
+:::
+
+::: {.fragment .keybox}
+Mixed models are the only row where the covariance **comes from a mechanism** (subjects have their own curves) and therefore works with **any timing** of measurements.
+:::
+
+---
+
+## From questions to tools
+
+::: {.lead}
+
+The model is the means. The **scientific question** is answered with contrasts and plots.
+
+:::
+
+::: {style="font-size: 0.73em"}
+
+| Question | Tool |
+|---|---|
+| What is the mean response at a given time? | `emmeans(m, ~ time, at = ...)` |
+| How fast does it change? | `emtrends(m, ~ 1, var = "time")` |
+| From which time does it differ from baseline? | `contrast(emmeans(m, ~ time), "trt.vs.ctrl")` |
+| What does the model look like? | `ggeffects::ggpredict()` + `plot()` |
+| Is the model reasonable? | `performance::check_model()`, `icc()`, `r2()` |
+| How sure are we about σ's or any derived number? | `confint(method = "boot")`, `bootMer()`, `PBmodcomp()` |
+| *Adding a group:* do groups differ? At which times? | `emmeans(m, ~ group | time)` + `pairs()` / `contrast()` |
+| Do groups change at a different **rate**? | `emtrends(m, ~ group, var = "time")` |
+| Is the change different between groups? | `contrast(..., interaction = c(group = ..., time = ...))` |
+
+:::
+
+```{r}
+#| eval: false
+#| echo: true
+install.packages(c("lme4", "lmerTest", "emmeans", "pbkrtest",
+                   "ggeffects", "performance", "see"))
+```
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 1 · Look first</p>
+<p class="bignum">1</p>
+<h2>The summary is not the data</h2>
+<p class="lead muted">Before any model: plot.</p>
+
+::: {.notes}
+- Idea: en M3–M6 han visto muchos modelos; hoy el orden es **mirar → modelar → leer**.
+- Pregunta: *"When did you last plot the raw data before fitting a model?"*
+:::
+
+
+---
+
+## Four datasets, the same numbers
+
+```{r}
+#| label: setup-b0
+#| include: false
+library(tidyverse)
+library(palmerpenguins)
+```
+
+```{r}
+#| label: anscombe-long
+#| echo: false
+#| output: false
+#| message: false
+#| warning: false
+ans <-
+  anscombe |>
+  mutate(obs = row_number()) |>
+  pivot_longer(-obs, names_to = c(".value", "set"), names_pattern = "(.)(.)") |>
+  mutate(set = paste("Dataset", set))
+dirname(knitr::current_input(dir = TRUE))
+save(ans, file = "./anscombe.rda")
+```
+
+::: {.columns}
+
+::: {.column width="65%"}
+
+::: {style="font-size: 0.8em"}
+
+```{r}
+#| echo: false
+ans |> print(n = 8)
+```
+
+:::
+
+:::
+
+
+::: {.column width="35%"}
+
+
+Anscombe's quartet (1973), available in R as `datasets::anscombe`.
+
+
+:::
+:::
+
+::: {style="font-size: 0.85em"}
+
+```{r}
+#| label: anscombe-table
+#| echo: false
+ans |>
+  group_by(set) |>
+  summarise("mean_x" = mean(x), "var_x" = var(x),
+            "mean_y" = mean(y), "var_y" = var(y),
+            "cor_xy" = cor(x, y),
+            "intercept" = coef(lm(y ~ x))[1],
+            "slope" = coef(lm(y ~ x))[2],
+            "R2" = summary(lm(y ~ x))$r.squared) |>
+  mutate(across(where(is.numeric), ~ round(.x, 1))) |>
+  knitr::kable()
+```
+
+:::
+
+::: {.fragment .punch}
+
+Same means, same variances, same correlation, <span class="#2a9d8f">same regression line</span>. <span class="counter">Same data?</span>
+
+:::
+
+::: {.notes}
+- Dejar ~30 s mirando la tabla.
+- Pregunta: *"Same means, variances, correlation, line, R²: are these the same data? Which model would you fit to each?"*
+- Recoger respuestas (casi todos dirán "sí / lineal") → preparar la sorpresa.
+:::
+
+
+
+---
+
+## Now look at them {.nostretch}
+
+::: {style="font-size: 0.75em"}
+
+```{r}
+#| label: anscombe-plot
+#| fig-height: 2.9
+ggplot(ans, aes(x, y)) +
+  geom_smooth(method = "lm", se = FALSE, color = "coral", linewidth = 1) +
+  geom_point(aes(color = set), size = 3, alpha = 0.75) +
+  facet_wrap(~set, nrow = 1) +
+  ggthemes::scale_color_colorblind() +
+  theme_minimal(base_size = 16) 
+```
+
+:::
+
+::: {style="font-size: 0.9em; margin-top:-37px;"}
+
+::: {.columns}
+
+::: {.column width="19%"}
+::: {.note}
+**1**: linear
+:::
+:::
+
+::: {.column width="23%"}
+::: {.note}
+**2**: a curve. Wrong model.
+:::
+:::
+
+::: {.column width="25%"}
+::: {.note}
+**3**: one outlier tilts the line
+:::
+:::
+
+::: {.column width="31%"}
+::: {.note}
+**4**: one point *creates* the line
+:::
+:::
+
+:::
+
+:::
+
+::: {style="font-size: 0.9em;"}
+
+::: {.fragment .keybox}
+Every summary and every coefficient is identical. **Only the plot** tells you which model is wrong.
+:::
+
+:::
+
+::: {.notes}
+*"Which of the four would you trust a linear regression on?"*
+
+- 2: curva → la media está mal especificada. 3: un atípico tuerce la recta. 4: un único punto con palanca crea la pendiente.
+- Bridge: in longitudinal data the “shape” is the trajectories; a per-visit summary hides them.
+:::
+
+
+---
+
+## Datasaurus dozen
+
+![](./datasaurus.gif){fig-align="center" width="90%"}
+
+::: {.notes}
+The most extreme and most famous case is the Datasaurus Dozen: 13 datasets, including a dinosaur, with the same means, SDs and correlation to two decimals.
+:::
+
+
+---
+
+## Simpson's paradox: the sign flips
+
+::: {style="font-size: 0.57em"}
+
+```{r}
+#| fig-height: 4.4
+library(palmerpenguins)
+peng <- penguins |> drop_na(bill_length_mm, bill_depth_mm, species)
+ggplot(peng, aes(bill_length_mm, bill_depth_mm)) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.3, color = "coral") +
+  labs(title = "All penguins together", subtitle = "longer bill → less deeper bill?", x = "bill length (mm)", y = "bill depth (mm)") +
+  theme_minimal()
+```
+
+:::
+
+```{r}
+#| label: penguins
+#| echo: false
+peng <- penguins |> drop_na(bill_length_mm, bill_depth_mm, species)
+
+p_all <- ggplot(peng, aes(bill_length_mm, bill_depth_mm)) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.3, color = "coral") +
+  labs(title = "All penguins together", subtitle = "longer bill → less deeper bill?",
+       x = "bill length (mm)", y = "bill depth (mm)") +
+  theme_minimal()
+```
+
+::: {.notes}
+- Pregunta: *"Longer bill → less deeper bill: do you believe it? What could be missing?"*
+- Dejar que alguien diga "especie" antes de pasar.
+:::
+
+
+---
+
+## Simpson's paradox: the sign flips {.nostretch}
+
+
+::: {style="font-size: 0.65em; margin-bottom:-19px;"}
+
+```{r}
+#| eval: false
+ggplot(peng, aes(bill_length_mm, bill_depth_mm, color = species)) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.3) +
+  scale_color_manual(values = c(Adelie = "#1d2b30", Chinstrap = "#c98a14", Gentoo = "#2a9d8f")) +
+  labs(title = "Split by species", subtitle = "longer bill → deeper bill, in every species", x = "bill length (mm)") +
+  theme_minimal()
+```
+
+:::
+
+```{r}
+#| echo: false
+p_sp <-
+  ggplot(peng, aes(bill_length_mm, bill_depth_mm, color = species)) +
+  geom_point(alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.3) +
+  scale_color_manual(values = c(Adelie = "#1d2b30", Chinstrap = "#c98a14", Gentoo = "#2a9d8f")) +
+  labs(title = "Split by species", subtitle = "longer bill → deeper bill, in every species",
+       x = "bill length (mm)", y = NULL, color = NULL) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 3.7
+#| echo: false
+p_all + p_sp
+```
+
+::: {style="font-size: 0.8em; margin-top:-35px;"}
+
+::: {.keybox}
+Pooled slope **< 0**, slope within every species **> 0**. A grouping variable we ignored reverses the conclusion
+:::
+
+:::
+
+::: {.notes}
+Pooled: slope < 0; within each species: > 0 (≈ +0.2).
+
+Species acts as a confounder of the pooled association.
+
+Bridge: in longitudinal data, the “group” we ignore is the person 
+:::
+
+
+---
+
+## Between vs within {.nostretch}
+
+::: {style="font-size: 0.9em;"}
+
+Eight office workers took part in a **6-week touch-typing course. Once a week (weeks 0 to 5), each one completed a typing test**
+:::
+
+```{r}
+load(file = "typing.rda")
+typing |> print(n = 7)
+```
+
+
+**Your turn.** Does typing faster go with **more** or **fewer** errors?
+
+
+::: {.notes}
+*"More or fewer errors?"*, *"Would you tell someone who wants to improve to type faster?"*
+
+- Tienen el dataset (`typing.rda`): 2–3 min para que lo dibujen ellos.
+- Apuntar las respuestas en la pizarra antes de la siguiente diapo.
+:::
+
+
+---
+
+## Simpson inside a person: between vs within {.nostretch}
+
+```{r}
+#| label: typing-sim
+#| echo: false
+load(file = "typing.rda")
+```
+
+
+::: {.columns}
+
+::: {.column width="30%"}
+
+::: {style="font-size: 0.6em;"}
+
+```{r}
+typing |> print(n = 5)
+```
+
+:::
+
+:::
+
+::: {.column width="70%"}
+
+::: {style="font-size: 0.5em; margin-bottom:-21px;"}
+
+```{r}
+#| eval: false
+p1 <- ggplot(typing, aes(speed, errors)) +
+  geom_point(color = "#6b7280", size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "coral", linewidth = 1.3) +
+  labs(title = "Ignoring who is who", subtitle = "faster typing → more errors",
+       x = "typing speed (words/min)", y = "errors") + theme_minimal()
+p2 <- ggplot(typing, aes(speed, errors, color = id)) +
+  geom_line(linewidth = .9) +
+  geom_point(aes(size = week), alpha = 0.7, size = 2) +
+  scale_color_viridis_d(end = .85, guide = "none") +
+  labs(title = "Each person over 6 weeks", subtitle = "as each person practices, errors go down",
+       x = "typing speed (words/min)", y = NULL) + theme_minimal()
+p1 + p2
+```
+
+:::
+:::
+:::
+
+```{r}
+#| label: typing-plot
+#| fig-height: 3
+#| echo: false
+p1 <- ggplot(typing, aes(speed, errors)) +
+  geom_point(color = "#6b7280", size = 2) +
+  geom_smooth(method = "lm", se = FALSE, color = "coral", linewidth = 1.3) +
+  labs(title = "Ignoring who is who", subtitle = "faster typing → more errors",
+       x = "typing speed (words/min)", y = "errors") +
+  theme_minimal()
+
+p2 <- ggplot(typing, aes(speed, errors, color = id)) +
+  geom_line(linewidth = .9) +
+  geom_point(aes(size = week), alpha = 0.7, size = 2) +
+  scale_color_viridis_d(end = .85, guide = "none") +
+  labs(title = "Each person over 6 weeks", subtitle = "as each person practices, errors go down",
+       x = "typing speed (words/min)", y = NULL) +
+  theme_minimal()
+p1 + p2
+```
+
+::: {style="font-size: 0.75em; margin-top:-25px;"}
+::: {.keybox}
+**Between** people: good typists are fast *and* less accurate. **Within a person, over time**: as they speed up with practice, they make less errors. Both are true.
+:::
+:::
+
+::: {.notes}
+
+Question: “Which answer matters for someone who wants to improve: between or within?” (within).
+
+Numbers (simulated): pooled lm() ≈ +0.24; between people ≈ +0.35; within each person ≈ −0.50.
+
+Between: a person who types 1 wpm faster on average makes 0.35 more errors. Within: when a person types 1 wpm faster than their own average, they make 0.5 fewer errors (because he improves!). The pooled slope mixes both.
+
+A mixed model can separate them (each person’s mean speed + deviation from it); just mention it.
+:::
+
+
+
+---
+
+## Same mean profile, different stories
+
+```{r}
+#| label: profiles-sim
+#| echo: false
+set.seed(2026)
+n <- 40
+make_traj <- function(slopes, label) {
+  tibble(id = 1:n, b0 = rnorm(n, 50, 4), slope = slopes) |>
+    crossing(t = 0:6) |>
+    mutate(y = b0 + slope * t + rnorm(n(), 0, 1.5), scenario = label, id = paste(label, id))
+}
+traj <- bind_rows(
+  make_traj(rnorm(n, 2, .3), "A · everybody improves a little"),
+  make_traj(rep(c(4, 0), each = n / 2), "B · half improve a lot, half not at all")
+)
+```
+
+```{r}
+#| label: profiles-plot
+#| fig-height: 3.6
+#| echo: false
+means <- traj |> group_by(scenario, t) |> summarise(y = mean(y), .groups = "drop")
+
+ggplot(traj, aes(t, y)) +
+  geom_line(aes(group = id), color = "#2a9d8f", alpha = .3) +
+  geom_line(data = means, color = "#1d2b30", linewidth = 1.6) +
+  geom_point(data = means, color = "#1d2b30", size = 2.5) +
+  facet_wrap(~ scenario) +
+  labs(x = "visit", y = "outcome")
+```
+
+::: {style="font-size: 0.7em;"}
+
+::: {.keybox}
+The **thick line is the same** in both panels: a table of means per visit, or the time coefficient of a fixed-effects-only model, **cannot tell A from B**.
+
+- **A**: everybody improves by about the same amount, so the average effect describes each person well -> random intercept is enough: slopes are almost equal.
+- **B**: half improve a lot (≈ 4 per visit), half not at all. The average effect (≈ 2 per visit) **happens to nobody** -> the **random-slope variance** is huge, and the fanning lines make the variance **grow over time** (heteroscedasticity).
+:::
+:::
+
+::: {.notes}
+- Pedir que miren primero solo las líneas negras: *"Same study?"*
+- A → con intercepto aleatorio basta. B → varianza de la pendiente aleatoria enorme; el abanico hace crecer la varianza con el tiempo (heterocedasticidad de M3).
+- Mensaje clínico: en B hay respondedores y no respondedores; el efecto medio no le pasa a nadie.
+- Pregunta: *"Which one would you rather have as a patient?"*
+:::
+
+
+
+---
+
+## When the mean profile lies: drop-out {.nostretch}
+
+::: {style="font-size: 0.65em;"}
+
+Simulated: patients leave once their marker exceeds 62 (informative drop-out).
+
+:::
+
+```{r}
+#| label: dropout-sim
+#| echo: false
+set.seed(11)
+n <- 60
+dropout <- tibble(id = 1:n, b0 = rnorm(n, 50, 6), slope = rnorm(n, 2, 1.2)) |>
+  crossing(t = 0:8) |>
+  mutate(y = b0 + slope * t + rnorm(n(), 0, 2)) |>
+  group_by(id) |>
+  mutate(gone = cumsum(y > 62) > 0,          # leaves the study once marker > 62
+         observed = !lag(gone, default = FALSE)) |>
+  ungroup()
+```
+
+```{r}
+#| label: dropout-plot
+#| fig-height: 4.1
+#| echo: false
+obs <- dropout |> filter(observed)
+mean_df <- bind_rows(
+  dropout |> group_by(t) |> summarise(y = mean(y), n = n()) |> mutate(what = "Truth (everyone)"),
+  obs |> group_by(t) |> summarise(y = mean(y), n = n()) |> mutate(what = "Observed (who is left)")
+)
+
+p_sp <- ggplot(obs, aes(t, y, group = id)) +
+  geom_line(color = "#6b7280", alpha = .4) +
+  geom_point(data = obs |> group_by(id) |> slice_max(t) |> filter(t < 8),
+             shape = 4, color = counter, size = 2.5, stroke = 1.2) +
+  geom_hline(yintercept = 62, linetype = "dashed", color = counter) +
+  labs(title = "Observed trajectories", subtitle = "x = last visit before dropping out",
+       x = "visit", y = "disease marker")
+
+p_m <- ggplot(mean_df, aes(t, y, color = what)) +
+  geom_line(linewidth = 1.4) +
+  geom_point(aes(size = n)) +
+  scale_color_manual(NULL, values = c("Truth (everyone)" = "#1d2b30", "Observed (who is left)" = counter)) +
+  scale_size(range = c(1, 4), guide = "none") +
+  labs(title = "Mean per visit", subtitle = "point size = patients still measured",
+       x = "visit", y = NULL)
+p_sp + p_m
+```
+
+::: {style="font-size: 0.8em; margin-top:-29px;"}
+
+::: {.keybox}
+Everybody keeps getting **worse**, but the sickest leave first, so the observed mean **flattens out** and badly underestimates the decline. Always plot **who is measured when**.
+:::
+
+:::
+
+::: {.notes}
+- Question, looking only at the red line: “Does the disease stabilise after visit 4?”
+- Informative drop-out: the sickest leave first.
+- One line: mixed models (likelihood-based) use all available visits → fine if drop-out depends on what was observed (MAR, Missing At Random); not if it depends on what was not observed (MNAR, Missing Not At Random).
+- Always report n per visit.
+:::
+
+
+
+---
+
+## Checklist: plots before any longitudinal model
+
+1. **Spaghetti plot**: all subjects, or a random sample if there are many. Do lines fan out? Parallel?
+2. **Mean profile ± SE per group, with *n* per time**: who is still there?
+3. **Facet by group**, and color by subject when there are few.
+4. **Choose the time axis**: time since baseline, age, time since an event?
+5. **Missingness pattern**: when do people stop being measured, and are they different?
+
+::: {.punch}
+Model what you have <span class="#2a9d8f">seen</span>, not what you <span class="counter">assumed</span>.
+:::
+
+
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 2 · Motivation: dataviz + model</p>
+<p class="bignum">2</p>
+<h2>Why a mixed model? In pictures</h2>
+<p class="lead muted">`sleepstudy`: 18 truck drivers under sleep restriction (3h per night for a week), reaction time measured every day</p>
+
+::: {.notes}
+- A partir de aquí: un dataset, un solo grupo, solo tiempo.
+- Flujo completo: plot → candidatos → leer → emmeans → bootstrap. Luego lo repiten ellos con ChickWeight.
+:::
+
+
+
+
+---
+
+## The data
+
+Mean reaction time (ms) of **18 drivers** in a psychomotor vigilance task (press a button as soon as a light appears), measured **every day** of a sleep-restriction study [@Belenkyetal03].
+
+
+::: {.columns}
+
+::: {.column width="47%"}
+
+::: {.incremental}
+- Outcome: average **reaction time** (ms).
+- Time: **Days** of restriction.
+- 8 measurements per person → **repeated measures**.
+:::
+
+::: {.fragment .note}
+Days 0–1 were adaptation/training and day 2 the baseline. We keep Days 2–9 and recode `Days = Days − 2` (0 = baseline).
+:::
+
+:::
+
+::: {.column width="53%"}
+
+```{r}
+#| label: sleep-glimpse
+library(lme4)
+sleep <-
+  sleepstudy |>
+  as_tibble() |>
+  filter(Days >= 2) |>
+  mutate("Days" = Days - 2)
+sleep |>
+  head(6)
+```
+
+:::
+
+:::
+
+::: {.notes}
+- Pregunta: *"How many observations? How many independent units?"* (144 vs 18) → clave para los df más adelante.
+- Por qué quitar días 0–1 (entrenamiento) y recodificar: el intercepto pasa a ser la basal.
+:::
+
+
+---
+
+## One line for everybody? One line per person? {.nostretch}
+
+```{r}
+#| label: sleep-pooling
+#| echo: false
+#| fig-height: 4.5
+fit_all <- lm(Reaction ~ Days, sleep)
+p_pool <- ggplot(sleep, aes(Days, Reaction)) +
+  geom_point(color = "#6b7280", alpha = .6) +
+  geom_smooth(method = "lm", se = FALSE, color = counter, linewidth = 1.4) +
+  labs(title = "Complete pooling",
+       subtitle = "one lm() for all → wrong SEs",
+       x = "Days of deprivation", y = "reaction time (ms)")
+
+p_nopool <- ggplot(sleep, aes(Days, Reaction)) +
+  geom_point(color = muted, size = .9) +
+  geom_smooth(method = "lm", se = FALSE, color = "#2a9d8f", linewidth = .9) +
+  facet_wrap(~ Subject, ncol = 6) +
+  labs(title = "No pooling",
+       subtitle = "one lm() per person: noisy, no population answer",
+       x = "Days", y = NULL) +
+  theme(strip.text = element_text(size = 9), axis.text = element_text(size = 8))
+
+p_pool + p_nopool + plot_layout(widths = c(1, 1.5))
+```
+
+::: {style="font-size: 0.85em; margin-top:-25px;"}
+
+::: {.fragment .keybox}
+People clearly differ in **baseline** *and* in **how fast they deteriorate**. We want both the **population** answer and the **individual** curves.
+:::
+
+:::
+
+::: {.notes}
+- Pooling completo: ignora la correlación → EE incorrectos (el −2·Cov de M3).
+- Sin pooling: 18 ajustes de 8 puntos, ruidosos, sin respuesta poblacional ni generalización a nuevos conductores.
+- Pregunta: *"Which of the two would you report in a paper?"* → ninguno → compromiso.
+:::
+
+
+---
+
+## First, plot. Then, model {.nostretch}
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sleep-spaghetti
+#| code-fold: true
+#| fig-height: 3.6
+ggplot(sleep, aes(Days, Reaction)) +
+  stat_summary(fun = mean, geom = "line", color = "#1d2b30", linewidth = 1.6) +
+  stat_summary(fun = mean, geom = "point", color = "#1d2b30", size = 2.5) +
+  scale_y_continuous(limits = c(200, 500)) +
+  labs(x = "days of deprivation", y = "reaction time (ms)") +
+  theme_minimal()
+```
+
+:::
+
+::: {.keybox}
+
+If this black line were all you had, which model would you fit?
+
+:::
+
+::: {.notes}
+- Respuesta esperada: `lm(Reaction ~ Days)`, una recta ≈ 11 ms/día. Que la diga alguien.
+:::
+
+
+
+---
+
+## First, plot. Then, model {.nostretch}
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sleep-spaghetti-2
+#| code-fold: true
+#| fig-height: 3.6
+ggplot(sleep, aes(Days, Reaction)) +
+  geom_line(aes(group = Subject), color = "#2a9d8f", alpha = 0.5) +
+  geom_point(aes(group = Subject), color = "#2a9d8f", alpha = 0.5, size = 1.5) +
+  stat_summary(fun = mean, geom = "line", color = "#1d2b30", linewidth = 1.6) +
+  stat_summary(fun = mean, geom = "point", color = "#1d2b30", size = 2.5) +
+  scale_y_continuous(limits = c(200, 500)) +
+  labs(x = "days of deprivation", y = "reaction time (ms)") +
+  theme_minimal()
+```
+
+:::
+
+::: {.keybox}
+
+Does this average line describe anyone in particular?
+
+:::
+
+::: {.notes}
+- Señalar conductores casi planos (abajo) frente a muy empinados (arriba).
+- La media ≈ 11 ms/día esconde ritmos de ~0 a 20+.
+:::
+
+
+---
+
+## First, plot. Then, model {.nostretch}
+
+::: {.columns}
+
+::: {.column width="60%"}
+
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sleep-spaghetti-3
+#| code-fold: true
+#| fig-height: 6
+ggplot(sleep, aes(Days, Reaction)) +
+  geom_line(aes(group = Subject), color = "#2a9d8f", alpha = 0.5) +
+  geom_point(aes(group = Subject), color = "#2a9d8f", alpha = 0.5, size = 1.5) +
+  stat_summary(fun = mean, geom = "line", color = "#1d2b30", linewidth = 1.6) +
+  stat_summary(fun = mean, geom = "point", color = "#1d2b30", size = 2.5) +
+  scale_y_continuous(limits = c(200, 500)) +
+  labs(x = "days of deprivation", y = "reaction time (ms)") +
+  theme_minimal()
+```
+
+:::
+
+:::
+
+::: {.column width="40%"}
+
+
+::: {style="font-size: 0.71em;"}
+
+::: {.keybox}
+
+The plot already tells you the model:
+
+  * different starting points → random intercept
+  * different rates → random slope
+  * a fan that opens over time → the variance grows
+  * mean rises roughly in a straight line → time as a numeric, linear term
+  * Are starting point and rate related (do slow starters also deteriorate faster)? Hard to tell by eye, but it doesn’t look like it → let the data decide: correlated vs uncorrelated random effects
+
+:::
+
+:::
+
+:::
+:::
+
+::: {.notes}
+- Ir viñeta a viñeta como pregunta: *"Same start?"* → intercepto; *"Same rate?"* → pendiente; *"Fan?"* → varianza; *"Straight?"* → tiempo numérico (M5 frente a M4).
+- Correlación: no se ve a ojo → que decidan los datos.
+- Guardar para ChickWeight: allí todos empiezan igual → otra estructura aleatoria.
+:::
+
+
+---
+
+
+## The compromise: partial pooling
+
+::: {style="font-size: 0.85em;"}
+
+::: {.lead}
+Each person has their **own line**, but those lines are assumed to be similar: they are drawn from the same **population** (with individual deviations around an average line: each person’s line borrows strength from everyone else’s). Below: i= drivers, j = Days
+
+:::
+
+:::
+
+::: {style="font-size: 0.7em;"}
+
+$$
+\text{Reaction}_{ij} = (\beta_1 + b_{1i}) + (\beta_2 + b_{2i})\,\text{Days}_{ij} + \varepsilon_{ij},\qquad
+\begin{pmatrix} b_{1i}\\ b_{2i}\end{pmatrix} \sim N(0, G), ~ G = \begin{pmatrix} \operatorname{Var}(b_{1i}) & \operatorname{Cov}(b_{1i}, b_{2i}) \\
+                    \operatorname{Cov}(b_{1i}, b_{2i}) & \operatorname{Var}(b_{2i}) \end{pmatrix}
+$$
+:::
+
+::: {.incremental}
+- $\beta_1, \beta_2$: **population** line (fixed effects).
+- $b_{1i}, b_{2i}$: how person $i$ **deviates** from it (random effects).
+- $G$: how much people vary (σ's and their correlation).
+:::
+
+::: {.notes}
+- Mapear con M6.2 (notación FLW: β₁, β₂; G y R).
+- Pregunta: *"How many parameters in G?"* (3: dos varianzas + covarianza).
+- "Borrow strength": conductores con datos ruidosos se acercan a la media → diapo de shrinkage.
+:::
+
+
+
+
+---
+
+## Three candidates
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sleep-fit
+# random intercept
+m_ri <- lmer(Reaction ~ Days + (1 | Subject), data = sleep)
+# random intercept + random slope
+m_rs <- lmer(Reaction ~ Days + (1 + Days | Subject), data = sleep)
+# random intercept + random slope (but uncorrelated)
+m_ind <- lmer(Reaction ~ Days + (Days || Subject), data = sleep)
+```
+
+:::
+
+
+```
+Reaction ~ Days + (1 + Days | Subject)
+           ────    ────────   ───────
+            │         │          └─ grouping: "per Subject" → one bᵢ per person
+            │         └──────────── which coefficients vary by person:
+            │                       1 = intercept (b₁ᵢ), Days = slope (b₂ᵢ)
+            └────────────────────── fixed part: β₁ + β₂·Days (the 1 is implicit)
+```
+
+::: {.fragment}
+
+::: {style="font-size: 0.7em"}
+
+| Formula | Meaning | Implied $G$ |
+|---|---|---|
+| `(1 | Subject)` | random intercept only: parallel lines | $g_{11}$ only (compound symmetry, M3) |
+| `(1 + Days | Subject)` | random intercept + slope, **correlated** | full $2 \times 2$ |
+| `(Days || Subject)` | random intercept + slope, **independent** | diagonal, $g_{12} = 0$ |
+
+:::
+
+::: {.note}
+Outside the brackets: what is **common** to everybody. Inside: **what** varies (left of `|`) and **by whom** (right of `|`). Read `|` as "per".
+:::
+
+:::
+
+::: {.notes}
+- Leer la fórmula en voz alta: "Reaction depends on Days; intercept and Days-slope vary per Subject".
+- Pregunta: *"Which of the three is the compound symmetry of M3?"* → `(1 | Subject)`.
+- Si preguntan: el modelo incorrelado depende de dónde se ponga el 0 del tiempo.
+:::
+
+
+---
+
+## The `summary()` wall
+
+::: {.columns}
+
+::: {.column width="65%"}
+
+::: {style="font-size: 0.9em"}
+
+```{r}
+#| label: summary
+summary(m_ri)$coefficients |> round(3)
+```
+
+```{r}
+#| label: summary-2
+summary(m_ind)$coefficients |> round(3)
+```
+
+```{r}
+#| label: summary-3
+summary(m_rs)$coefficients |> round(3)
+```
+
+:::
+:::
+
+::: {.column width="35%"}
+
+::: {style="font-size: 0.61em"}
+
+Fixed effects (model 1): $\beta_1 \sim N(267.97, 10.871)$ and $\beta_2 \sim N(11.44, 1.099)$
+
+Fixed effects (model 2): $\beta_1 \sim N(267.97, 8.464)$ and $\beta_2 \sim N(11.44, 1.890)$
+
+Fixed effects (model 3): $\beta_1 \sim N(267.97, 8.266)$ and $\beta_2 \sim N(11.44, 1.845)$
+
+:::
+:::
+:::
+
+::: {.keybox}
+
+Same estimates in all three models; what changes is the uncertainty. Ignoring that people deteriorate at different rates (`m_ri`) makes the slope look much more precise than it is: SE 1.1 vs 1.9, df 125 vs 17. For the average rate, the sample size is 18 people, not 144 observations.
+
+:::
+
+::: {.notes}
+- Antes del keybox: *"What changes between the three tables, and what doesn't?"*
+- Estimaciones idénticas (datos balanceados); cambian EE y df.
+- `m_ri` demasiado optimista: EE 1.10 vs 1.89; df 125 vs ~18.
+- Si hay tiempo: repartir al azar a los 18 en dos grupos falsos → con `m_ri` "encuentras" diferencias de pendiente mucho más del 5 % de las veces.
+:::
+
+
+
+---
+
+## Three candidates
+
+::: {style="font-size: 0.75em;"}
+
+```{r}
+#| label: sleep-fit-2
+#| code-line-numbers: "7"
+# random intercept
+m_ri <- lmer(Reaction ~ Days + (1 | Subject), data = sleep)
+# random intercept + random slope
+m_rs <- lmer(Reaction ~ Days + (1 + Days | Subject), data = sleep)
+# random intercept + random slope (but uncorrelated)
+m_ind <- lmer(Reaction ~ Days + (Days || Subject), data = sleep)
+anova(m_ri, m_rs, m_ind)
+```
+
+:::
+
+**And the winner is...**
+
+::: {style="font-size: 0.8em;"}
+
+* m_ri → m_ind (add random slopes): p < 0.001 (AIC 1446 → 1424). **Own slopes are needed: people deteriorate at different rates**
+* m_ind → m_rs (add correlation): p = 0.55 (AIC 1424 → 1425). **Correlation adds nothing**: knowing where someone starts tells us nothing about how fast they deteriorate.
+
+:::
+
+::: {.notes}
+- `anova()` ordena por nº de parámetros y compara cada fila con la anterior; reajusta con ML.
+- Pregunta: *"Which model would you keep, and why?"* → `m_ind` (parsimonia: menor AIC y BIC).
+- Ojo: contrastar varianza = 0 está en el borde → p de la χ² conservador → motiva `PBmodcomp()` en el bloque 4.
+:::
+
+
+
+---
+
+## Reading the output in plain words
+
+::: {.columns}
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.7em;"}
+
+`coef() = fixef() + ranef()`
+
+```{r}
+#| label: sleep-out
+summary(m_ind)$coefficients |> round(3)
+fixef(m_ind)
+VarCorr(m_ind)
+ranef(m_ind)$Subject |> head(5)
+coef(m_ind)$Subject |> head(5)
+```
+
+:::
+
+:::
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.85em;"}
+::: {.keybox}
+**Your turn:**
+
+1. How fast does the **average** driver react at baseline? How much slower each day?
+2. How much do drivers differ in their **baseline**? And in their **rate**?
+3. Driver **308**: baseline and rate? Check that `coef()` = `fixef()` + `ranef()`.
+4. Which is the distribution of the slope?
+5. What is bigger: differences **between drivers** at baseline, or **day-to-day noise** within a driver?
+:::
+:::
+
+:::
+
+:::
+
+::: {.notes}
+1. `fixef()`: 268 ms at baseline; +11.4 ms per day.
+2. `VarCorr()`: SD of baselines ≈ 32 ms; SD of rates ≈ 7 ms/day.
+3. 308: 291.6 ms (= 267.97 + 23.65) and 20.2 ms/day (= 11.44 + 8.75): starts slower and deteriorates almost twice as fast as average.
+4. 11.44 ± 2 · 6.99 → −2.5 to 25.4 ms/day (assumes β₂ + b₂ᵢ ~ N(11.44, 6.99²)).
+5. Between-driver SD (32) > residual SD (25): people differ more from each other than from their own day-to-day fluctuation. Most variability is between people. Measurements of the same driver are strongly correlated, so ignoring who is who is badly wrong, and each driver works as their own control for studying change.
+:::
+
+::: {.fragment .note}
+This "population of slopes" statement is what a model with only fixed effects **cannot** give you
+:::
+
+
+
+---
+
+## Uncertainty, in one picture
+
+```{r}
+#| echo: false
+b  <- fixef(m_ind)
+vc <- as.data.frame(VarCorr(m_ind))
+sd_int   <- vc$sdcor[vc$var1 == "(Intercept)" & !is.na(vc$var1)]
+sd_slope <- vc$sdcor[vc$var1 == "Days" & !is.na(vc$var1)]
+
+curves <- bind_rows(
+  tibble(what = "Starting level (ms)",
+         x = seq(b[1] - 4 * sd_int, b[1] + 4 * sd_int, length.out = 300),
+         dens = dnorm(x, b[1], sd_int)),
+  tibble(what = "Rate of change (ms/day)",
+         x = seq(b[2] - 4 * sd_slope, b[2] + 4 * sd_slope, length.out = 300),
+         dens = dnorm(x, b[2], sd_slope))
+) |> mutate(what = fct_inorder(what))
+
+people <- coef(m_ind)$Subject |>
+  as_tibble(rownames = "Subject") |>
+  pivot_longer(-Subject, values_to = "x") |>
+  mutate(what = if_else(name == "Days", "Rate of change (ms/day)", "Starting level (ms)"),
+         what = factor(what, levels = levels(curves$what)))
+
+ggplot(curves, aes(x, dens)) +
+  geom_area(fill = fact, alpha = .25) +
+  geom_line(color = fact, linewidth = 1.1) +
+  geom_vline(data = tibble(what = levels(curves$what), m = b),
+             aes(xintercept = m), color = ink, linewidth = 1) +
+  geom_point(data = people, aes(x, y = 0), color = counter, size = 2.5, alpha = .8) +
+  facet_wrap(~ what, scales = "free") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+::: {.notes}
+- Curvas = población de conductores que supone el modelo; puntos = los 18 `coef()`; línea negra = β.
+- Pregunta: *"Do the 18 drivers look like draws from these normals?"*
+- Ojo con el título: esto es **variabilidad entre conductores**, no incertidumbre de la estimación (esa llega en el bloque 4).
+:::
+
+
+---
+
+## Three lines per person {.nostretch}
+
+```{r}
+#| label: sleep-three-lines
+#| code-fold: true
+#| fig-height: 4.5
+ind <- sleep |>
+  group_by(Subject) |>
+  summarise(fit = list(lm(Reaction ~ Days))) |>
+  mutate(a = map_dbl(fit, ~ coef(.x)[1]), s = map_dbl(fit, ~ coef(.x)[2]))
+blup <- coef(m_rs)$Subject |>
+  rownames_to_column("Subject") |>
+  rename(a_blup = `(Intercept)`, s_blup = Days)
+lines_df <- ind |>
+  select(Subject, a, s) |>
+  left_join(blup, by = "Subject")
+
+ggplot(sleep, aes(Days, Reaction)) +
+  geom_point(color = "#6b7280", size = 1) +
+  geom_abline(aes(intercept = b[1], slope = b[2], color = "Population (fixed effects)"),
+              linewidth = .7, data = lines_df) +
+  geom_abline(aes(intercept = a, slope = s, color = "Own lm() (no pooling)"),
+              linetype = "dashed", linewidth = .7, data = lines_df) +
+  geom_abline(aes(intercept = a_blup, slope = s_blup, color = "Mixed model (BLUP)"),
+              linewidth = 1, data = lines_df) +
+  facet_wrap(~ Subject, ncol = 9) +
+  scale_color_manual(NULL, values = c("Population (fixed effects)" = "grey70",
+                                       "Own lm() (no pooling)" = counter,
+                                       "Mixed model (BLUP)" = "#2a9d8f")) +
+  labs(x = "Days", y = "reaction time (ms)") +
+  theme(strip.text = element_text(size = 9), axis.text = element_text(size = 8))
+```
+
+::: {style="font-size: 0.8em; margin-top:-30px;"}
+
+::: {.note}
+The mixed-model line (green) sits **between** the person's own line (orange) and the population line (grey).
+:::
+
+:::
+
+::: {.notes}
+- Pregunta: *"Where is the gap between orange and green largest? Why?"* (conductores ruidosos o con un día raro, p. ej. 332).
+- Nota para mí: la línea gris usa `b` de `m_ind` y la verde `coef(m_rs)`; visualmente da igual.
+:::
+
+
+
+---
+
+## Shrinkage, in one picture
+
+::: {.columns}
+
+::: {.column width="60%"}
+
+```{r}
+#| label: sleep-shrinkage
+#| echo: false
+#| fig-height: 5.4
+#| fig-width: 7
+ggplot(lines_df) +
+  geom_segment(aes(x = a, y = s, xend = a_blup, yend = s_blup),
+               arrow = arrow(length = unit(.15, "cm")), color = "#6b7280") +
+  geom_point(aes(a, s, color = "Own lm()"), size = 2.6) +
+  geom_point(aes(a_blup, s_blup, color = "BLUP"), size = 2.6) +
+  geom_point(aes(x = b[1], y = b[2]), shape = 4, size = 5, stroke = 1.6, color = "#1d2b30") +
+  scale_color_manual(NULL, values = c("Own lm()" = counter, "BLUP" = "#2a9d8f")) +
+  labs(x = "intercept (ms)", y = "slope (ms/day)")
+```
+
+:::
+
+::: {.column width="40%"}
+
+::: {.lead}
+Every arrow points **towards the population mean** (✕).
+:::
+
+::: {.incremental}
+- Extreme, noisy individual estimates are **pulled in**.
+- How much? It depends on how noisy the person's data are compared with how much people differ ($G$ vs $\sigma^2$).
+- This is the BLUP / empirical Bayes formula from M6.2, at work.
+:::
+
+:::
+
+:::
+
+::: {.notes}
+- Pregunta: *"Which points move the most?"* (los extremos / más ruidosos).
+- Pregunta: *"With 100 measurements per driver, longer or shorter arrows?"* (más cortas: los datos propios pesan más).
+- Enlazar con la fórmula de M6.2: media ponderada entre la curva poblacional y los datos del individuo.
+:::
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 3 · Answers</p>
+<p class="bignum">3</p>
+<h2>emmeans</h2>
+<p class="lead muted">Let the model do the arithmetic [@Lenth24]</p>
+
+---
+
+## emmeans in one picture
+
+<div class="schematic">
+<svg width="1050" height="250" viewBox="0 0 1050 250" xmlns="http://www.w3.org/2000/svg" font-family="DM Sans, sans-serif">
+  <rect x="10" y="40" width="300" height="150" rx="10" fill="#f7f6f3" stroke="#1d2b30" stroke-width="2"/>
+  <text x="160" y="80" text-anchor="middle" font-size="22" font-weight="700" fill="#1d2b30">1 · Reference grid</text>
+  <text x="160" y="115" text-anchor="middle" font-size="17" fill="#6b7280">the values you ask about</text>
+  <text x="160" y="150" text-anchor="middle" font-size="17" fill="#2a9d8f" font-family="IBM Plex Mono, monospace">Days = 0, 3, 7</text>
+  <line x1="315" y1="115" x2="370" y2="115" stroke="#1d2b30" stroke-width="2.5" marker-end="url(#arS)"/>
+  <rect x="375" y="40" width="300" height="150" rx="10" fill="#f7f6f3" stroke="#1d2b30" stroke-width="2"/>
+  <text x="525" y="80" text-anchor="middle" font-size="22" font-weight="700" fill="#1d2b30">2 · Predictions</text>
+  <text x="525" y="115" text-anchor="middle" font-size="17" fill="#6b7280">model mean at each value, with SE</text>
+  <text x="525" y="150" text-anchor="middle" font-size="17" fill="#2a9d8f" font-family="IBM Plex Mono, monospace">emmeans() / emtrends()</text>
+  <line x1="680" y1="115" x2="735" y2="115" stroke="#1d2b30" stroke-width="2.5" marker-end="url(#arS)"/>
+  <rect x="740" y="40" width="300" height="150" rx="10" fill="#f7f6f3" stroke="#e76f51" stroke-width="2"/>
+  <text x="890" y="80" text-anchor="middle" font-size="22" font-weight="700" fill="#1d2b30">3 · Contrasts</text>
+  <text x="890" y="115" text-anchor="middle" font-size="17" fill="#6b7280">differences + p-values + adjustment</text>
+  <text x="890" y="150" text-anchor="middle" font-size="17" fill="#e76f51" font-family="IBM Plex Mono, monospace">pairs() / contrast()</text>
+  <defs><marker id="arS" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#1d2b30"/></marker></defs>
+</svg>
+</div>
+
+::: {.keybox}
+You never touch the coefficients. You say **where** (which days) and **what** (means, differences, slopes); `emmeans` builds the combinations, SEs, df and p-values.
+:::
+
+::: {.note}
+With `lmer` models, `emmeans` uses **Kenward-Roger** degrees of freedom (via `pbkrtest`) by default.
+:::
+
+---
+
+## Before `emmeans`: by hand
+
+```{r}
+#| label: sl-byhand
+summary(m_ind)$coefficients |> round(2)
+```
+
+::: {.keybox}
+**Your turn**, with this table only:
+
+1. Expected reaction time of the **average driver** on day 0, day 3 and day 7?
+2. How much **slower** is the average driver on day 7 than on day 0?
+3. And the **standard error** of each of those numbers?
+:::
+
+::: {.fragment .note}
+Day 0: 267.97 · Day 3: 267.97 + 3 · 11.44 ≈ 302.3 · Day 7: 267.97 + 7 · 11.44 ≈ 348.1 · Day 7 − Day 0 = 7 · 11.44 ≈ 80.1 ms. The SEs need the **covariance** of the estimates: $\sqrt{x' \, \mathrm{vcov}(\hat\beta) \, x}$, e.g. `x <- c(1, 3); sqrt(t(x) %*% vcov(m_ind) %*% x)`. Tedious → `emmeans` does it for you.
+:::
+
+::: {.notes}
+- Q1: Day 0: 267.97 · Day 3: 267.97 + 3 · 11.44 ≈ 302.3 · Day 7: 267.97 + 7 · 11.44 ≈ 348.1 · 
+- Q2: Day 7 − Day 0 = 7 · 11.44 ≈ 80.1 ms.
+
+:::
+
+---
+
+## Step 1 · Expected reaction time on given days
+
+::: {.note}
+The numbers you computed by hand (268, 302, 348 ms; 80 ms), now with SE, CI, df and adjusted p-values.
+:::
+
+```{r}
+#| label: sl-emm
+emm_sl <- emmeans(m_ind, ~ Days, at = list(Days = c(0, 3, 7)))
+```
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {.smalltab}
+```{r}
+#| label: sl-emm-tab
+#| echo: false
+emm_sl |> summary()
+```
+:::
+
+::: {.smalltab}
+```{r}
+#| label: sl-emm-contrast
+# Tukey (reverse = later minus earlier)
+pairs(emm_sl, reverse = TRUE)
+```
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sl-emm-plot
+#| fig-width: 6
+#| fig-height: 4.6
+emm_sl |> summary() |> as_tibble() |>
+  ggplot(aes(x = factor(Days), y = emmean)) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), color = "#2a9d8f", size = 0.8) +
+  labs(x = "Days", y = "Expected reaction time (ms)") +
+  theme_minimal()
+```
+
+:::
+
+:::
+
+:::
+
+::: {.notes}
+- Comparar con lo calculado a mano: mismas medias, y ahora con EE (8.5, 9.3, 14.3: crecen con el día, por la pendiente aleatoria).
+- Pregunta: *"Why is the SE on day 7 larger than on day 0?"* (la varianza de la pendiente multiplica por t²; el abanico de M3).
+- `pairs(..., reverse = TRUE)`: Tukey para 3 comparaciones; con una recta, 7 − 0 = 7 · β₂.
+:::
+
+
+
+---
+
+## Before `emtrends`: by hand
+
+::: {.keybox}
+**Your turn**, with the same `summary(m_ind)` table:
+
+1. What is the **average rate of deterioration** (ms/day)?
+
+Extra. Compute its **95 % CI** by hand. (Hint: estimate ± `qt(0.975, df)` · SE.)
+:::
+
+::: {.fragment .note}
+Rate = 11.44 ms/day. CI: 11.44 ± `qt(0.975, 18.1)` · 1.89 ≈ 11.44 ± 2.10 · 1.89 → **7.47 – 15.4** ms/day.
+:::
+
+::: {.notes}
+- Fácil a propósito: aquí la pendiente es un único coeficiente.
+- Pregunta: *"Why df ≈ 18 and not 142?"* (la información sobre el ritmo medio viene de 18 conductores).
+- Avisar: con curvas o grupos la pendiente es una suma de coeficientes y depende del día → ahí `emtrends` ahorra el trabajo (bloque 6).
+:::
+
+---
+
+## Step 2 · How fast? `emtrends`
+
+::: {.note}
+Same 11.4 and 7.47 – 15.4 you got by hand.
+:::
+
+```{r}
+#| label: sl-emtrends
+emtrends(m_ind, ~ 1, var = "Days")
+```
+
+::: {.keybox}
+The **average rate of deterioration is 11.4 ms/day**, with its CI and Kenward-Roger df (≈ 17, one per driver minus one, not 144 observations). Same number as `fixef()`, but with uncertainty attached (7.47 – 15.4: 95 % CI for the average rate)
+:::
+
+::: {.note}
+With a straight line and no groups, `emtrends` just returns $\hat\beta_2$. It becomes essential with curves (quadratic, splines) or groups, where the slope depends on time or group: next block.
+:::
+
+::: {.notes}
+- `~ 1` = una sola pendiente global (sin grupos); con dietas será `~ Diet`.
+- Pregunta: *"What would `emtrends` return if time entered as a quadratic?"* (una pendiente distinta para cada día → hay que decir `at =`).
+:::
+
+
+---
+
+## Step 3 · From which day? Time as a factor
+
+::: {style="font-size: 0.6em;"}
+
+
+```{r}
+#| code-line-numbers: "1"
+sleep_f <- sleep |> mutate(Days_f = factor(Days))
+m_fac <- lmer(Reaction ~ Days_f + (1 | Subject), data = sleep_f)
+vs_base <- contrast(emmeans(m_fac, ~ Days_f), method = "trt.vs.ctrl", ref = 1)
+confint(vs_base)
+```
+
+:::
+
+Why <span class="counter">time as a factor</span>?
+
+With numeric Days there is one line: every “day k − day 0” is just $k \beta_2$, so the line, not the data, decides “from which day”. With `factor(Days)` each day gets its own free mean (no shape assumed), so each day can be compared with baseline.
+
+---
+
+## Step 3 · From which day? Time as a factor
+
+::: {style="font-size: 0.6em;"}
+
+
+```{r}
+#| code-line-numbers: "2"
+sleep_f <- sleep |> mutate(Days_f = factor(Days))
+m_fac <- lmer(Reaction ~ Days_f + (1 | Subject), data = sleep_f)
+vs_base <- contrast(emmeans(m_fac, ~ Days_f), method = "trt.vs.ctrl", ref = 1)
+vs_base
+```
+
+:::
+
+Why <span class="counter">no random slope</span>?
+
+With a factor there is no single slope, only 7 dummies. `(1 | Subject)` gives the mixed-model version of RM-ANOVA (compound symmetry).
+
+
+---
+
+## Step 3 · From which day? Time as a factor
+
+::: {style="font-size: 0.6em;"}
+
+
+```{r}
+#| code-line-numbers: "3-4"
+sleep_f <- sleep |> mutate(Days_f = factor(Days))
+m_fac <- lmer(Reaction ~ Days_f + (1 | Subject), data = sleep_f)
+vs_base <- contrast(emmeans(m_fac, ~ Days_f), method = "trt.vs.ctrl", ref = 1)
+confint(vs_base)
+```
+
+:::
+
+Why <span class="counter">each piece of code</span> do?
+
+::: {style="font-size: 0.65em;"}
+
+* `emmeans(m_fac, ~ Days_f)`: the estimated mean reaction time on each day (8 means, with SE).
+* `contrast()`: differences between those means, with SE, t-test and adjusted p-value.
+* `method = "trt.vs.ctrl"`: each level vs a reference (day 1 − day 0, …, day 7 − day 0). Others: "pairwise", "consec". 
+* `ref = 1`: the reference is the 1st level (day 0).
+* `confint()`: confidence intervals for those differences (Dunnett-adjusted), instead of p-values.
+
+:::
+
+::: {style="font-size: 0.8em;"}
+
+::: {.keybox}
+
+Days 1–2: not clearly different from baseline (CIs include 0). From day 3 on, reaction time is clearly slower, and the gap keeps growing: ≈ 43 ms on day 3, ≈ 86 ms on day 7 (Dunnett-adjusted 95 % CIs).
+
+:::
+
+:::
+
+
+---
+
+## Step 3 · From which day? Time as a factor
+
+
+::: {style="font-size: 0.7em;"}
+
+```{r}
+#| label: sl-factor-plot
+#| fig-height: 4
+#| code-fold: true
+confint(vs_base) |>
+  as_tibble() |>
+  left_join(as_tibble(vs_base) |> select(contrast, p.value), by = "contrast") |>
+  mutate(sig = if_else(p.value < .05, "p < 0.05", "p ≥ 0.05"), contrast = fct_inorder(contrast)) |>
+  ggplot(aes(contrast, estimate, color = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#6b7280") +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), size = .6) +
+  scale_color_manual(NULL, values = c("p < 0.05" = counter, "p ≥ 0.05" = "#6b7280")) +
+  labs(x = NULL, y = "difference vs day 0 (ms), Dunnett 95% CI") +
+  theme_minimal()
+```
+
+:::
+
+::: {.keybox}
+
+Days 1–2: not clearly different from baseline (CIs include 0). From day 3 on, reaction time is clearly slower.
+
+:::
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 4 · Uncertainty</p>
+<p class="bignum">4</p>
+<h2>The bootstrap</h2>
+<p class="lead muted">When the formulas are not enough.</p>
+
+---
+
+## Why? Three cracks in the usual inference
+
+
+::: {style="font-size: 0.8em;"}
+::: {.incremental}
+1. **No exact df** for fixed effects: Satterthwaite/KR are approximations, shaky with few subjects (18 here).
+2. **Variance components** (σ's) are skewed and cannot be negative → Wald CIs are bad.
+3. **"Do I need the random slope?"** tests whether a variance $g_{22} = 0$, on the **boundary**, but a variance cannot be negative → the usual χ² p-value is then too large (conservative)
+:::
+:::
+
+
+---
+
+## Parametric bootstrap: the idea
+
+<div class="schematic">
+<svg width="1080" height="230" viewBox="0 0 1080 230" xmlns="http://www.w3.org/2000/svg" font-family="DM Sans, sans-serif">
+  <defs><marker id="arS2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#1d2b30"/></marker></defs>
+  <rect x="5" y="50" width="220" height="120" rx="10" fill="#f7f6f3" stroke="#1d2b30" stroke-width="2"/>
+  <text x="115" y="95" text-anchor="middle" font-size="20" font-weight="700" fill="#1d2b30">Fitted model</text>
+  <text x="115" y="130" text-anchor="middle" font-size="16" fill="#6b7280">β̂, Ĝ, σ̂</text>
+  <line x1="230" y1="110" x2="280" y2="110" stroke="#1d2b30" stroke-width="2.5" marker-end="url(#arS2)"/>
+  <rect x="285" y="50" width="230" height="120" rx="10" fill="#f7f6f3" stroke="#2a9d8f" stroke-width="2"/>
+  <text x="400" y="95" text-anchor="middle" font-size="20" font-weight="700" fill="#1d2b30">Simulate</text>
+  <text x="400" y="130" text-anchor="middle" font-size="16" fill="#6b7280">18 new drivers → new data</text>
+  <line x1="520" y1="110" x2="570" y2="110" stroke="#1d2b30" stroke-width="2.5" marker-end="url(#arS2)"/>
+  <rect x="575" y="50" width="220" height="120" rx="10" fill="#f7f6f3" stroke="#2a9d8f" stroke-width="2"/>
+  <text x="685" y="95" text-anchor="middle" font-size="20" font-weight="700" fill="#1d2b30">Refit</text>
+  <text x="685" y="130" text-anchor="middle" font-size="16" fill="#6b7280">compute θ&#42; (anything)</text>
+  <line x1="800" y1="110" x2="850" y2="110" stroke="#1d2b30" stroke-width="2.5" marker-end="url(#arS2)"/>
+  <rect x="855" y="50" width="220" height="120" rx="10" fill="#f7f6f3" stroke="#e76f51" stroke-width="2"/>
+  <text x="965" y="95" text-anchor="middle" font-size="20" font-weight="700" fill="#1d2b30">Distribution</text>
+  <text x="965" y="130" text-anchor="middle" font-size="16" fill="#6b7280">percentiles → CI, p</text>
+  <path d="M400,175 C400,215 685,215 685,175" fill="none" stroke="#c98a14" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="542" y="225" text-anchor="middle" font-size="16" fill="#c98a14" font-weight="600">repeat B = 500–1000 times</text>
+</svg>
+</div>
+
+::: {.keybox}
+No df, no normal approximation for θ̂: the **sampling distribution is simulated** from the fitted model. θ can be a σ, a prediction, a contrast, an ICC…
+:::
+
+---
+
+## CIs for the σ's: profile vs bootstrap
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.8em;"}
+
+```{r}
+#| label: sl-ci-profile
+ci_prof <- confint(m_ind, oldNames = FALSE)
+ci_prof
+```
+
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.8em;"}
+
+```{r}
+#| label: sl-ci-boot
+set.seed(2026)
+ci_boot <- confint(m_ind, method = "boot",
+                   nsim = 500, oldNames = FALSE)
+ci_boot
+```
+
+:::
+
+:::
+
+:::
+
+::: {.keybox}
+SD of the slopes: **`r round(ci_boot[2, 1], 1)`–`r round(ci_boot[2, 2], 1)` ms/day** (bootstrap). Drivers clearly differ in how fast they deteriorate; how much exactly is quite uncertain with 18 people.
+:::
+
+::: {.note}
+**Profile** (the default of `confint()`): fast, deterministic, relies on a χ² approximation. **Bootstrap**: slow, simulation-based, works for any quantity. Here they agree.
+:::
+
+
+---
+
+## Any derived quantity: `bootMer()`
+
+::: {style="font-size: 0.63em;"}
+
+**Example: estimate the % of drivers who worsen by more than 20 ms/day** (personal slope), and how uncertain that number is. **Why bootstrap?** This % is not a parameter but a combination of $\hat\beta_2$ and $\hat\sigma$. There is no formula for its SE; the bootstrap gets it by simulation.
+
+:::
+
+::: {.columns}
+
+::: {.column width="52%"}
+
+::: {style="font-size: 0.55em;"}
+
+```{r}
+#| label: sl-bootmer
+# % of drivers worsening > 20 ms/day
+pct_fast <- function(fit) {
+  b <- fixef(fit)["Days"]
+  vc <- VarCorr(fit) |> as_tibble()
+  s  <- vc$sdcor[which(vc$var1 == "Days")]
+  100 * (1 - pnorm(20, b, s))
+}
+set.seed(2026)
+bt_sl <- bootMer(m_ind, pct_fast, nsim = 1000)
+bt_sl$t0
+quantile(bt_sl$t, c(.025, .975))
+```
+
+:::
+
+::: {style="font-size: 0.61em;"}
+`pct_fast()` computes it from a fitted model:
+    
+* `b`: average slope (11.44 ms/day).
+* `s`: SD of slopes across drivers (6.99).
+
+:::
+
+
+:::
+
+::: {.column width="48%"}
+
+```{r}
+#| label: sl-bootmer-plot
+#| echo: false
+#| fig-width: 6
+#| fig-height: 4.5
+#| code-fold: true
+q_sl <- quantile(bt_sl$t, c(.025, .975))
+ggplot(tibble(p = as.numeric(bt_sl$t)), aes(p)) +
+  geom_histogram(bins = 35, fill = fact, color = "white", alpha = 0.8) +
+  geom_vline(xintercept = q_sl, linetype = "dashed", color = counter, linewidth = 1) +
+  geom_vline(xintercept = bt_sl$t0, color = ink, linewidth = 1.2) +
+  labs(x = "% of drivers worsening > 20 ms/day (1000 refits)", y = "count") +
+  theme_minimal()
+```
+
+<!-- ::: {style="font-size: 0.65em;"} -->
+
+<!-- * `bt_sl$t0 = 11.02`: the value from the real data (black line, ≈ 11 % of drivers would worsen by more than 20 ms/day). -->
+<!-- * `quantile(bt_sl$t, c(.025, .975))` = 0.4–27.6 %: the 95 % CI (dashed lines). -->
+<!-- * Histogram: the 1000 simulated values. -->
+
+<!-- ::: -->
+:::
+
+:::
+
+
+
+::: {style="font-size: 0.65em;"}
+
+`bootMer(m_ind, pct_fast, nsim = 1000)`: simulates 1000 new studies of 18 drivers from the model, refits each one and recomputes `pct_fast()'. Result: 1000 percentages.
+
+:::
+
+::: {.fragment .punch}
+The resampling unit is the <span class="#2a9d8f">subject</span>, not the <span class="counter">observation</span>.
+:::
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 5 · Practice</p>
+<p class="bignum">5</p>
+<h2>ChickWeight: your turn</h2>
+<p class="lead muted">Same workflow as `sleepstudy`, new data: 50 chicks, 4 diets, 21 days.</p>
+
+::: {.notes}
+- Their turn: same steps as `sleepstudy` (plot → candidates → compare → read). We discuss after each step.
+- What is new (a group: diet) comes in block 6.
+:::
+
+
+---
+
+## The data
+
+**50 chicks** on **4 diets**, weighed (g) on days 0, 2, 4, …, 20, 21 [@CrowderHand90].
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+```{r}
+#| label: cw-table
+chicks |>
+  group_by(Diet) |>
+  summarise(chicks = n_distinct(Chick),
+            measurements = n())
+```
+
+:::
+
+::: {.column width="50%"}
+
+::: {.incremental}
+- **Unbalanced**: Diet 1 has twice as many chicks.
+- **Drop-out**: some chicks die (chick 18 has only 2 weights).
+- Growth is **not** a straight line.
+:::
+
+::: {.fragment .keybox}
+Unbalanced + missing + curved: what response profiles (M4) struggle with and mixed models handle.
+:::
+
+::: {.fragment .note}
+`Chick` comes as an **ordered** factor: convert it with `factor(as.character(Chick))`. Always check your `id`.
+:::
+
+::: {.notes}
+- Question: *"How many independent units? How many observations?"* (50 chicks, 578 weights).
+- Question: *"Why could drop-out matter here?"* (chicks that die may be the ones growing badly: informative drop-out, block 1).
+- `id` as ordered factor → `lmer` still works, but `emmeans`/plots can behave oddly. Always check.
+:::
+
+
+:::
+
+:::
+
+---
+
+## Exercise
+
+::: {.columns}
+
+::: {.column width="70%"}
+
+::: {style="font-size: 0.85em"}
+1. **Spaghetti plot**, one panel per `Diet`. Different starts? Different rates? A fan?
+2. **Mean profile ± 2 SE** per diet. Line or curve?
+3. **Candidates**: random intercept vs intercept + slope (correlated / uncorrelated). Then linear vs quadratic time.
+4. Compare with `anova()`. Which one do you keep, and why?
+5. `fixef()`, `VarCorr()`: how much do chicks differ in growth rate?
+6. `ranef()`, `coef()`: which chick grows fastest? Slowest?
+<!-- 7. **CI for the SD of the slopes**: profile and bootstrap. -->
+:::
+
+::: {.notes}
+- Give ~15 min for 1–4; we then go through them slide by slide.
+- 5 and 6 come back later as separate slides (after reading `summary(m3)`).
+- Hint if stuck in 3: look at the spaghetti plot first, do chicks really start at different weights?
+:::
+
+
+:::
+
+::: {.column width="30%"}
+
+```{r}
+#| label: cw-ex1
+#| echo: false
+#| eval: false
+ggplot(chicks, aes(Time, weight, group = Chick)) +
+  geom_line(alpha = .5) +
+  facet_wrap(~ Diet, nrow = 1)
+
+ctrl <- lmerControl(optimizer = "bobyqa")
+c1 <- lmer(weight ~ Time * Diet + (1 | Chick),
+           data = chicks, control = ctrl)
+c2 <- lmer(weight ~ Time * Diet + (Time || Chick),
+           data = chicks, control = ctrl)
+c3 <- lmer(weight ~ Time * Diet + (1 + Time | Chick),
+           data = chicks, control = ctrl)
+c4 <- lmer(weight ~ (Time + I(Time^2)) * Diet +
+             (1 + Time | Chick),
+           data = chicks, control = ctrl)
+anova(c1, c2, c3, c4)
+```
+
+:::
+
+:::
+
+
+---
+
+
+## 1. Look first: spaghetti plot
+
+```{r}
+#| label: cw-spaghetti
+#| code-fold: true
+#| fig-height: 4.6
+pal_diet <- c("1" = "#1d2b30", "2" = ghost, "3" = "#2a9d8f", "4" = counter)
+ggplot(chicks, aes(Time, weight, group = Chick, color = Diet)) +
+  geom_line(alpha = .7) +
+  facet_wrap(~ Diet, nrow = 1, labeller = label_both) +
+  scale_color_manual(values = pal_diet) +
+  labs(x = "day", y = "weight (g)")
+```
+
+::: {.note}
+Same start, then curves **fan out**: chicks differ in growth rate (random slopes), and the spread grows over time.
+:::
+
+::: {.notes}
+- Questions: *"Different starts?"* (no: all ≈ 40 g). *"Different rates?"* (yes). *"A fan?"* (yes). *"Straight lines?"* (no: curves bend up).
+- Contrast with `sleepstudy`: there drivers started at different levels; here chicks start equal → a random intercept may matter much less.
+:::
+
+
+---
+
+## 2. Look first: mean profiles
+
+::: {.columns}
+
+::: {.column width="52%"}
+
+::: {style="font-size: 0.7em"}
+
+```{r}
+#| label: cw-means
+#| code-fold: true
+#| fig-height: 5.4
+#| fig-width: 7
+chicks |>
+  summarise(m = mean(weight), se = sd(weight) / sqrt(n()),
+            .by = c(Diet, Time)) |>
+  ggplot(aes(Time, m, color = Diet)) +
+  geom_line(linewidth = 1) +
+  geom_pointrange(aes(ymin = m - 2 * se, ymax = m + 2 * se), size = .3) +
+  scale_color_manual(values = pal_diet) +
+  labs(x = "day", y = "mean weight (g) ± 2 SE") +
+  theme_minimal()
+```
+
+:::
+:::
+
+::: {.column width="48%"}
+
+::: {style="font-size: 0.8em"}
+
+```{r}
+#| label: cw-sd
+chicks |>
+  filter(Time %in% c(0, 6, 12, 21)) |>
+  summarise(sd = sd(weight), .by = Time)
+```
+
+:::
+
+::: {.fragment .keybox}
+SD goes from **≈1 g** to **≈70 g**. Correlation **and** heteroscedasticity
+:::
+
+::: {.notes}
+- Question: *"Line or curve?"* (curve, especially Diet 3) → quadratic time (M5).
+- SD × 70: the fan from the spaghetti plot, in numbers. Random slopes explain part of it (variance grows with t²).
+- Mention: on the log scale growth is closer to linear and the spread more stable (option if residuals look bad).
+:::
+
+
+:::
+
+:::
+
+---
+
+## 3. Building the model: three candidates
+
+::: {style="font-size: 0.8em"}
+
+::: {.lead}
+Mean: diet × time (line or quadratic). Covariance: random intercept, or intercept + slope.
+:::
+
+:::
+
+::: {style="font-size: 0.6em"}
+
+
+```{r}
+#| label: cw-candidates-2
+m0 <- lmer(weight ~ Time * Diet + (0 + Time | Chick), data = chicks)
+m1 <- lmer(weight ~ Time * Diet + (1 | Chick), data = chicks)
+m2 <- lmer(weight ~ Time * Diet + (1 + Time | Chick), data = chicks)
+m3 <- lmer(weight ~ (Time + I(Time^2)) * Diet + (1 + Time | Chick), data = chicks)
+```
+
+::: {.note}
+`I(Time^2)` adds a quadratic term. With `(Time + I(Time^2)) * Diet` each diet gets its own (non linear) curve
+:::
+
+::: {.notes}
+- Question: *"Which candidate does the spaghetti plot suggest?"* (m0: common start, own rate).
+- m1 is the "copy-paste from `sleepstudy`" model: it ignores what we saw.
+- `* Diet`: each diet has its own intercept, slope (and curvature in m3): $\alpha_{d}$, $\beta_{d}$, $\gamma_{d}$.
+:::
+
+
+:::
+
+
+::: {style="font-size: 0.65em"}
+
+
+**m0** · random slope only: common start, own rate
+$$
+Y_{ij} = \alpha_{d(i)} + (\beta_{d(i)} + b_{2i})\, t_{ij} + \varepsilon_{ij},
+\qquad b_{2i} \sim N(0, g_{22})
+$$
+
+**m1** · random intercept only: own start, common rate
+$$
+Y_{ij} = (\alpha_{d(i)} + b_{1i}) + \beta_{d(i)}\, t_{ij} + \varepsilon_{ij},
+\qquad b_{1i} \sim N(0, g_{11})
+$$
+
+**m2** · random intercept + slope (correlated)
+$$
+Y_{ij} = (\alpha_{d(i)} + b_{1i}) + (\beta_{d(i)} + b_{2i})\, t_{ij} + \varepsilon_{ij},
+\qquad \begin{pmatrix} b_{1i} \\ b_{2i} \end{pmatrix} \sim N\!\left(\mathbf{0}, \begin{pmatrix} g_{11} & g_{12} \\ g_{12} & g_{22} \end{pmatrix}\right)
+$$
+
+**m3** · as m2 + a quadratic curve per diet
+$$
+Y_{ij} = (\alpha_{d(i)} + b_{1i}) + (\beta_{d(i)} + b_{2i})\, t_{ij} + \gamma_{d(i)}\, t_{ij}^2 + \varepsilon_{ij},
+\qquad \begin{pmatrix} b_{1i} \\ b_{2i} \end{pmatrix} \sim N(\mathbf{0}, G)
+$$
+
+:::
+
+---
+
+## 4. Comparing candidates {.smaller}
+
+::: {style="font-size: 0.9em"}
+
+
+```{r}
+#| label: cw-anova-2
+anova(m1, m0, m2, m3)
+```
+
+```{r}
+#| label: cw-compare-2
+compare_performance(m1, m0, m2, m3) |>
+  as_tibble() |>
+  select(Name, AIC, BIC, R2_marginal, R2_conditional, ICC, RMSE)
+```
+
+:::
+
+::: {.note}
+**Rates matter far more than starts** (m0 ≫ m1, by AIC: they are not nested). Adding a random intercept helps a bit more (m2), and a **quadratic curve helps a lot (m3)**. Unlike before, here the correlation between start and rate is clearly needed (p < 0.001, lower AIC) → **we keep m3**
+:::
+
+::: {.notes}
+- `anova()` compares each row with the previous one: m1 vs m0 have the same nº of parameters and are **not nested** → ignore that χ² row, compare AIC (5508 vs 4908).
+- Question: *"Why does a random intercept still help if everybody starts at 40 g?"* (a straight line / parabola does not fit day 0 perfectly; the intercept absorbs part of that misfit).
+- Correlation start–rate ≈ −0.94 (`m3` vs `m3` uncorrelated: p < 0.001): opposite to `sleepstudy`.
+:::
+
+
+
+---
+
+## The `summary()` wall {.smaller}
+
+
+```{r}
+#| label: cw-summary-2-bis
+summary(m3)$coefficients |> round(3)
+```
+
+* `Diet k`: difference vs Diet 1 at day 0 (≈ 0: same start)
+* `Time`: only for Diet 1 (the reference)
+* `Time:Diet k`: the difference in slope between Diet k and Diet 1 at day 0.
+* `I(Time^2):Diet k`: the difference in curvature between Diet k and Diet 1 (how much more (or less) Diet k’s growth rate accelerates each day?)
+
+::: {.notes}
+- Everything is relative to Diet 1 **at day 0**: `(Intercept)`, `Time`, `I(Time^2)` are Diet 1's own values.
+- Each diet's curve = sum of its coefficients, e.g. Diet 3: (37.86 + 0.96) + (4.92 + 0.14) t + (0.067 + 0.229) t².
+- Question: *"`Diet3` has p = 0.86: does Diet 3 not matter?"* (no: it only says Diet 3 starts like Diet 1).
+:::
+
+
+---
+
+## Your turn: read the coefficients
+
+::: {.columns}
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.57em"}
+
+
+```{r}
+#| label: cw-summary-2
+summary(m3)$coefficients |> round(3)
+```
+
+:::
+
+:::
+
+::: {.column width="55%"}
+
+
+::: {style="font-size: 0.71em"}
+
+Using the `summary(m3)` table:
+
+1. What is the growth rate of **Diet 1 at day 0**? Which coefficient(s) do you need?
+2. What is the growth rate of **Diets 2, 3 and 4 at day 0**?
+3. Which diet grows fastest **at the start**?
+4. What is the growth rate of **Diets 1, 3 and 4 at day 10**? (Hint: with a quadratic curve, the rate at day *t* is slope + 2 · curvature · *t*.)
+5. Which diet grows fastest **at day 10**? Why did the ranking change?
+6. Do the diets differ in **weight at day 0**? 
+7. Which diets have a **different growth rate at day 0** from Diet 1? 
+
+:::
+
+:::
+:::
+
+
+::: {.notes}
+- Give 5 min for Q1–7.
+- **Q1.** Diet 1 at day 0 = `Time` = **4.92 g/day** (only that coefficient: Diet 1 is the reference).
+- **Q2.** Day 0: Diet 2 = 4.92 + 0.89 = **5.81**; Diet 3 = 4.92 + 0.14 = **5.06**; Diet 4 = 4.92 + 3.26 = **8.18** g/day (`Time` + `Time:Diet k`).
+- **Q3.** **Diet 4** grows fastest at the start.
+- **Q4.** Day 10 (slope + 2 · curvature · 10): Diet 1 = 4.92 + 2 · 0.067 · 10 = **6.26**; Diet 3 = 5.06 + 2 · (0.067 + 0.229) · 10 = **10.99**; Diet 4 = 8.18 + 2 · (0.067 − 0.003) · 10 = **9.46** g/day.
+- **Q5.** **Diet 3** at day 10: it accelerates much more (`I(Time^2):Diet3` = 0.229) while Diet 4 barely accelerates (−0.003), so Diet 3 overtakes it.
+- **Q6.** No: `Diet2`, `Diet3`, `Diet4` ≈ 0 g with p > 0.7 → common start (≈ 40 g at hatching).
+- **Q7.** Only **Diet 4** (`Time:Diet4`, p = 0.028).
+- Warn: p > 0.05 for one coefficient does **not** mean the diet grows like Diet 1 (Diet 3: same rate at day 0, but ≈ 105 g heavier at day 21).
+- Check the rates with `emtrends(m3, ~ Diet, var = "Time", at = list(Time = 10))`.
+- Punchline → block 6: "which diet is heaviest at day 21?" needs combinations + SEs → `emmeans`.
+:::
+
+
+
+::: {.fragment .punch}
+Which diet gives the <span class="#2a9d8f">heaviest chicks at day 21</span>? <span class="counter">Good luck</span> reading it from here.
+:::
+
+::: {.fragment .note}
+Each coefficient is a difference from Diet 1 **at day 0** or a difference in curvature. Answers need **combinations** of coefficients ($\beta_2 + \beta_7 + 21\,\beta_{10} + \dots$)
+:::
+
+
+
+
+---
+
+## 5. How much do chicks differ in growth rate?
+
+Using `VarCorr(m3)`:
+
+1. Within the same diet, how much do chicks differ in their **weight at day 0**? 
+2. And in their **growth rate**? 
+3. Are **start** and **rate** related? What does the sign of the correlation mean?
+
+
+::: {.fragment .note}
+
+```{r}
+VarCorr(m3)  
+```
+
+:::
+
+::: {.notes}
+- Q1: SD of intercepts ≈ **11.3 g** (chicks of the same diet differ by ~±22 g at day 0, by the model's line).
+- Q2: SD of slopes ≈ **3.3 g/day** (e.g. Diet 1: 4.92 ± 2 · 3.3 → roughly −1.6 to 11.5 g/day at day 0).
+- Q3: correlation ≈ **−0.94**: chicks whose line starts higher grow more slowly at first (partly the model compensating the curvature at day 0, not necessarily biology).
+:::
+
+
+---
+
+
+## 6. Which chick grows fastest? Slowest?
+
+::: {style="font-size: 0.5em"}
+
+```{r}
+ranef(m3)$Chick |> head(5)
+coef(m3)$Chick |> head(5)
+```
+
+:::
+
+1. What is the difference between the `Time` column of `ranef(m3)$Chick` and that of `coef(m3)$Chick`?
+2. Which chick grows **fastest relative to its own diet**? And slowest?
+3. In `coef(m3)$Chick`, the `Time` column is $\hat\beta_{\text{Time}} + \hat b_{2i}$. Is that the actual day-0 growth rate of a **Diet 3** chick? What is missing?
+
+
+
+::: {.notes}
+- Ask the 3 questions **before** revealing the output.
+- **Answers.** Q1: `ranef()` = each chick's deviation $\hat b_{2i}$ from **its diet's** mean rate; `coef()` = `Time` (Diet 1's rate) + $\hat b_{2i}$.
+- Q2: fastest relative to its diet: **chick 21** (Diet 2, +7.2 g/day); slowest: **chick 24** (Diet 2, −7.3 g/day). Both on the same diet!
+:::
+
+
+
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 6 · Adding a group in emmeans</p>
+<p class="bignum">6</p>
+<h2>What's new with a diet</h2>
+<p class="lead muted">Group differences, group × time, and how to show them.</p>
+
+::: {.notes}
+- Same model (`m3`), new questions: everything that needs a **group**.
+- Pattern for the whole block: first **by hand** from `summary(m3)`, then `emmeans` / `emtrends` does it (with SEs, CIs, adjusted p-values).
+:::
+
+---
+
+## Before `emmeans`: by hand {.smaller}
+
+```{r}
+#| label: cw-summary
+summary(m3)$coefficients |> round(3)
+```
+
+::: {.keybox}
+**Your turn**, with this table only:
+
+1. Expected weight of a **Diet 1** chick and of a **Diet 3** chick at **day 21**?
+2. How much heavier is Diet 3 than Diet 1 at day 21?
+3. Is that difference **significant**? What would you need to know?
+:::
+
+::: {.fragment .punch}
+Which diet gives the <span class="fact">heaviest chicks at day 21</span>? <span class="counter">Good luck</span> reading it from here.
+:::
+
+::: {.notes}
+- Give 3–4 min. Q1–Q2 are doable, Q3 is the trap.
+- **Answers.** Diet 1: 37.86 + 4.92 · 21 + 0.067 · 441 ≈ **171 g**. Diet 3: (37.86 + 0.96) + (4.92 + 0.14) · 21 + (0.067 + 0.229) · 441 ≈ **276 g**. Difference ≈ **105 g** = 0.96 + 0.14 · 21 + 0.229 · 441.
+- Q3: the SE of that sum needs `vcov(m3)` (covariances between coefficients) → $\sqrt{x' \, \mathrm{vcov}(\hat\beta) \, x}$. Nobody wants to do that for 4 diets × 22 days.
+- Question: *"Which coefficient's p-value would you look at for Q3?"* (none: no single coefficient answers it).
+:::
+
+---
+
+## Step 1 · Estimated means by diet and day
+
+
+
+::: {.columns}
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: emm-fit-2
+emm <- emmeans(m3, ~ Diet | Time, at = list(Time = c(0, 10, 21)))
+contrast(emm)
+```
+
+:::
+
+::: {style="font-size: 0.65em"}
+```{r}
+#| label: emm-print-2
+#| echo: false
+summary(emm) |>
+  as_tibble() |>
+  filter(Time == 21) |>
+  transmute(Diet, Time, emmean = round(emmean, 1), SE = round(SE, 1),
+            `95% CI` = paste0(round(lower.CL), "–", round(upper.CL))) |>
+  knitr::kable()
+```
+:::
+
+::: {.note}
+`~ Diet | Time` reads "**Diet**, separately **by** Time". `at` picks the days of the reference grid. Shown: day 21.
+:::
+
+:::
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: emm-plot-2
+#| fig-height: 3.6
+#| fig-width: 6.6
+as_tibble(summary(emm)) |>
+  ggplot(aes(factor(Time), emmean, color = Diet)) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), position = position_dodge(.5), size = .5) +
+  scale_color_manual(values = pal_diet) +
+  labs(x = "day", y = "estimated mean weight (g)")
+```
+
+:::
+
+:::
+
+:::
+
+::: {.notes}
+- Point at day 21: 171 and 276 g, the same numbers they computed by hand, now with SE and CI.
+- Question: *"Why do the CIs get wider with time?"* (random slopes: chicks fan out, the M3 heteroscedasticity).
+- Question: *"Why is the Diet 1 SE smaller than the others?"* (twice as many chicks).
+:::
+
+---
+
+## Effects plot · each diet across days
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: eff-diet-time
+#| fig-height: 3
+days_grid <- c(0, 4, 8, 12, 16, 21)
+emm_grid <- emmeans(m3, ~ Diet | Time, at = list(Time = days_grid)) |> as_tibble()
+
+ggplot(emm_grid, aes(Time, emmean, color = Diet, group = Diet)) +
+  geom_line(linewidth = 1) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), position = position_dodge(1), size = .5) +
+  scale_color_manual(values = pal_diet) +
+  scale_x_continuous(breaks = days_grid) +
+  labs(x = "day", y = "estimated mean weight (g) ± 95% CI") +
+  theme_minimal()
+```
+
+:::
+
+::: {style="font-size: 0.85em"}
+
+
+::: {.keybox}
+One line per diet: **how each diet evolves over time**. Lines that diverge = group × time interaction. Error bars from `emmeans`, so they account for the within-chick correlation.
+:::
+
+:::
+
+::: {.notes}
+- This is the classic "effects plot" for papers: model-based means ± CI, not raw means.
+- Question: *"How is this different from the raw mean-profile plot of exercise 2?"* (model-based: uses all chicks, handles drop-out, SEs account for repeated measures).
+- Question: *"Where would you say the lines start to separate?"* → keep the answer for the difference curve.
+:::
+
+---
+
+## Effects plot · each day across diets
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: eff-time-diet
+#| fig-height: 3.1
+ggplot(emm_grid, aes(Diet, emmean, color = factor(Time), group = factor(Time))) +
+  geom_line(linewidth = 1, position = position_dodge(.3)) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), size = .5) +
+  scale_color_viridis_d("day", end = .9) +
+  labs(x = "Diet", y = "estimated mean weight (g) ± 95% CI")
+```
+
+:::
+
+::: {style="font-size: 0.85em"}
+
+
+::: {.keybox}
+Same estimates, axes swapped: one line per day, **how the diets compare on that day**. Flat at day 0 (randomised start), increasingly unequal later: the diet effect **grows with time**.
+:::
+
+:::
+
+
+::: {.notes}
+- Same numbers as the previous slide; only the question changes ("over time" vs "between diets on a given day").
+- Question: *"If there were no interaction, what would these lines look like?"* (parallel: same diet differences every day).
+:::
+
+---
+
+## Step 2 · All pairwise comparisons
+
+::: {style="font-size: 0.6em"}
+
+
+```{r}
+#| label: emm-pairs-2
+#| output: false
+emm21 <- emmeans(m3, ~ Diet, at = list(Time = 21))
+pairs(emm21, adjust = "tukey")
+```
+
+:::
+
+::: {.columns}
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.65em"}
+
+```{r}
+#| label: emm-pairs-tab-2
+#| echo: false
+as_tibble(pairs(emm21, adjust = "tukey")) |>
+  transmute(contrast = str_replace_all(contrast, "Diet", "Diet "),
+            estimate = round(estimate, 1), SE = round(SE, 1),
+            p = format.pval(round(p.value, 4), eps = 1e-4)) |>
+  knitr::kable()
+```
+:::
+
+:::
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: emm-pairs-plot-2
+#| fig-height: 3.4
+#| fig-width: 6.4
+#| code-fold: true
+confint(pairs(emm21, adjust = "tukey")) |>
+  as_tibble() |>
+  left_join(as_tibble(pairs(emm21)) |> select(contrast, p.value), by = "contrast") |>
+  mutate(sig = if_else(p.value < .05, "p < 0.05", "p ≥ 0.05"),
+         contrast = fct_reorder(contrast, estimate)) |>
+  ggplot(aes(estimate, contrast, color = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#6b7280") +
+  geom_pointrange(aes(xmin = lower.CL, xmax = upper.CL), size = .6) +
+  scale_color_manual(NULL, values = c("p < 0.05" = counter, "p ≥ 0.05" = muted)) +
+  labs(x = "difference in weight at day 21 (g), Tukey 95% CI", y = NULL)
+```
+
+:::
+
+:::
+
+:::
+
+::: {.note}
+6 comparisons → Tukey adjustment. Only **1 vs 3** and **1 vs 4** are clear at day 21. The note *"results may be misleading due to interactions"* reminds you that the answer **depends on the day** you chose.
+:::
+
+::: {.notes}
+- `Diet1 - Diet3` ≈ −105 g: the by-hand difference, now with its SE and an adjusted p-value (Q3 of the by-hand slide answered).
+- Question: *"Diets 3 and 4 differ by ≈ 40 g but p ≈ 0.45: why?"* (big SEs at day 21: few chicks per diet, large spread).
+- Question: *"Would the answer be the same at day 10?"* → no: interaction.
+:::
+
+---
+
+## Step 2b · Each diet vs the control
+
+```{r}
+#| label: emm-ctrl-2
+contrast(emm21, method = "trt.vs.ctrl", ref = 1)
+```
+
+::: {.columns}
+
+::: {.column width="50%"}
+::: {.fragment .keybox}
+If the question is "**does any new diet beat the standard one?**", you only need 3 tests, not 6 → Dunnett adjustment → more power.
+:::
+:::
+
+::: {.column width="50%"}
+::: {.fragment .note}
+Other built-in `method`s: `"pairwise"`, `"revpairwise"`, `"poly"`, `"consec"`, `"eff"` (vs grand mean)
+:::
+:::
+
+:::
+
+::: {.notes}
+- Question: *"Compare the p-value of 1 vs 4 here and in the Tukey table. Why smaller?"* (fewer comparisons → milder adjustment).
+- Key message: decide the family of questions **before** looking at the results.
+:::
+
+---
+
+## Step 2c · The difference curve
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: diff-curve
+#| fig-height: 2.8
+emmeans(m3, ~ Diet | Time, at = list(Time = 0:21)) |>
+  contrast(method = "trt.vs.ctrl", ref = 1, adjust = "none") |> confint() |> as_tibble() |>
+  ggplot(aes(Time, estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#6b7280") +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), fill = fact, alpha = .2) +
+  geom_line(color = fact, linewidth = 1.2) +
+  facet_wrap(~ contrast, nrow = 1) +
+  labs(x = "day", y = "difference vs Diet 1 (g), 95% CI")
+```
+
+:::
+
+::: {.keybox}
+Not "is there a difference?" but "**from when**?": the band leaves 0 from day 3–4 for Diets 4 and 3, and only at the very end (day 21, barely) for Diet 2.
+:::
+
+::: {.note}
+Pointwise 95 % CIs (`adjust = "none"`): good for describing, not a formal test at every day.
+:::
+
+::: {.notes}
+- Same machinery as Step 2b, but on a grid of 22 days instead of one.
+- Question: *"From which day would you say Diet 4 beats Diet 1?"* (≈ day 3).
+- Caveat: 22 × 3 unadjusted intervals → descriptive, not 66 tests.
+:::
+
+---
+
+## Before the difference of differences: by hand
+
+```{r}
+#| label: did-byhand
+fixef(m3) |> round(3)
+```
+
+::: {.keybox}
+**Your turn**:
+
+1. How many grams does a **Diet 1** chick gain from day 0 to day 21? And a **Diet 3** chick?
+2. How much **more** does Diet 3 gain than Diet 1?
+3. Compare with the difference at day 21 (≈ 105 g). Why are they not exactly equal?
+:::
+
+::: {.notes}
+- **Answers.** Gain from day 0 to 21 = slope · 21 + curvature · 441 (the intercept cancels). Diet 1: 4.917 · 21 + 0.067 · 441 ≈ **133 g**. Diet 3: (4.917 + 0.140) · 21 + (0.067 + 0.229) · 441 ≈ **237 g**. Difference ≈ **104 g** = `Time:Diet3` · 21 + `I(Time^2):Diet3` · 441.
+- Q3: the day-21 difference (≈ 105 g) also includes the tiny day-0 gap (`Diet3` = 0.96 g). Gains remove each diet's own starting point.
+- Question: *"Which coefficients are the interaction?"* (`Time:Diet k`, `I(Time^2):Diet k`: exactly what this difference uses).
+:::
+
+---
+
+## Step 2d · Difference of differences
+
+::: {.lead}
+The **group × time interaction**  as one number: how much more did Diet *k* chicks **gain** from day 0 to day 21 than Diet 1 chicks?
+:::
+
+```{r}
+#| label: did
+emm_0_21 <- emmeans(m3, ~ Diet * Time, at = list(Time = c(0, 21)))
+contrast(emm_0_21, interaction = c(Diet = "trt.vs.ctrl", Time = "trt.vs.ctrl"))
+```
+
+::: {.fragment .keybox}
+$[\mu_{21}(k) - \mu_{0}(k)] - [\mu_{21}(1) - \mu_{0}(1)]$: change in Diet *k* **minus** change in Diet 1. Diet 3 gains **≈104 g more** than Diet 1.
+:::
+
+::: {.fragment .note}
+Two subtractions, two jobs. **Within each diet**, day 21 − day 0 **normalises** for where chicks started (each diet is compared with its own baseline). **Between diets**, subtracting Diet 1's change **controls** for the growth every chick would have anyway. What is left is the gain **attributable to the diet**: the logic of difference-in-differences.
+:::
+
+::: {.notes}
+- 104 g: the by-hand number, now with SE and p-value.
+- Question: *"Why not just compare weights at day 21?"* (that mixes the starting gap with the diet effect; here the gap is ≈ 0 thanks to randomisation, but in observational data it can be large).
+- Question: *"Why not just look at Diet 3's own gain (237 g)?"* (chicks grow anyway: you need a control to know how much is due to the diet).
+- Link to M4: the test of `Time:Diet` / `I(Time^2):Diet` is the "are the profiles parallel?" question.
+:::
+
+---
+
+## Before `emtrends`: by hand
+
+::: {.keybox}
+**Your turn**, with `fixef(m3)` (remember: rate at day *t* = slope + 2 · curvature · *t*):
+
+1. Growth rate of **each diet** at **day 10**?
+2. Diets 3 and 4 at day 10: which grows faster, and by how much?
+3. Is that difference significant? What would you need?
+:::
+
+::: {.notes}
+- Same exercise as in block 5 (Q4), now for the 4 diets and a contrast.
+- **Answers.** Day 10: Diet 1 = 4.92 + 2 · 0.067 · 10 ≈ **6.26**; Diet 2 = (4.92 + 0.89) + 2 · (0.067 + 0.063) · 10 ≈ **8.42**; Diet 3 = (4.92 + 0.14) + 2 · (0.067 + 0.229) · 10 ≈ **10.99**; Diet 4 = (4.92 + 3.26) + 2 · (0.067 − 0.003) · 10 ≈ **9.46** g/day. Diet 3 − Diet 4 ≈ **1.5** g/day.
+- Q3: again needs `vcov(m3)` → `emtrends`.
+:::
+
+---
+
+## Step 3 · Rates of growth by diet: `emtrends`
+
+```{r}
+#| label: emtrends-10
+#| output: false
+slopes10 <- emtrends(m3, ~ Diet, var = "Time", at = list(Time = 10))
+slopes10
+pairs(slopes10)
+```
+
+::: {.columns}
+
+::: {.column width="40%"}
+
+```{r}
+#| label: emtrends-tab
+#| echo: false
+as_tibble(slopes10) |>
+  transmute(Diet, `g/day` = round(Time.trend, 2),
+            `95% CI` = paste0(round(lower.CL, 1), "–", round(upper.CL, 1))) |>
+  knitr::kable()
+```
+
+:::
+
+::: {.column width="60%"}
+
+```{r}
+#| label: emtrends-pairs-tab
+#| echo: false
+as_tibble(pairs(slopes10)) |>
+  transmute(contrast, estimate = round(estimate, 2), SE = round(SE, 2),
+            p = round(p.value, 4)) |>
+  knitr::kable()
+```
+
+:::
+
+:::
+
+::: {.note}
+Now `~ Diet` (one slope per diet) instead of `~ 1`. With a quadratic model the slope depends on the day (M5: $\beta_2 + 2\beta_3 t$), hence `at = list(Time = 10)`.
+:::
+
+::: {.notes}
+- Same 6.26 / 8.42 / 10.99 / 9.46 as by hand.
+- Diet 3 vs 4: 1.5 g/day, p ≈ 0.73 → not distinguishable at day 10. Only Diet 3 vs Diet 1 is clear (p ≈ 0.004).
+- Question: *"What would change if you asked at day 2 instead of day 10?"*
+:::
+
+---
+
+## Step 3b · …and how the rate evolves
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: emtrends-curve
+#| fig-height: 3.6
+#| code-fold: true
+emtrends(m3, ~ Diet | Time, var = "Time", at = list(Time = 0:21)) |>
+  as_tibble() |>
+  ggplot(aes(Time, Time.trend, color = Diet, fill = Diet)) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = .12, color = NA) +
+  geom_line(linewidth = 1.1) +
+  scale_color_manual(values = pal_diet) + scale_fill_manual(values = pal_diet) +
+  labs(x = "day", y = "growth rate (g/day)")
+```
+
+:::
+
+::: {style="font-size: 0.8em"}
+
+::: {.keybox}
+**Diet 4** starts fastest but barely accelerates; **Diet 3** accelerates most and overtakes it after about a week. That's the story behind `Time:Diet4` and `I(Time^2):Diet3`, now readable.
+:::
+
+:::
+
+::: {.notes}
+- Each line is straight because the mean is quadratic: rate = slope + 2 · curvature · t.
+- Question: *"Where do Diets 3 and 4 cross?"* (≈ day 7–8): the answer to "which diet grows fastest" depends on when you ask.
+- Intercept of each line = `Time` (+ `Time:Diet k`); slope of each line = 2 · curvature.
+:::
+
+
+---
+
+## Marginal vs conditional, by diet
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: gg-cond
+#| fig-height: 3.4
+#| code-fold: true
+chicks |>
+  mutate(chick_curve = predict(m3),                  # Xβ + Zb_i  (conditional)
+         pop_curve   = predict(m3, re.form = NA)) |> # Xβ         (marginal)
+  ggplot(aes(Time, color = Diet)) +
+  geom_point(aes(y = weight), alpha = .15, size = .8) +
+  geom_line(aes(y = chick_curve, group = Chick), alpha = .45) +
+  geom_line(aes(y = pop_curve), linewidth = 1.6, color = ink) +
+  facet_wrap(~ Diet, nrow = 1, labeller = label_both) +
+  scale_color_manual(values = pal_diet, guide = "none") +
+  labs(x = "day", y = "weight (g)")
+```
+
+:::
+
+::: {.keybox}
+Thin lines: each chick's curve, $X\hat\beta + Z\hat b_i$. Thick line: each diet's population curve, $X\hat\beta$.
+:::
+
+::: {.notes}
+- Marginal = typical chick on that diet (`re.form = NA`); conditional = this particular chick (`predict()`).
+- Question: *"Which one do you report to compare diets? Which one to follow a given chick?"*
+- Point at the flat Diet 2 chick (chick 24): its own curve is far from its diet's mean.
+:::
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Block 7 · Practice again</p>
+<p class="bignum">7</p>
+<h2>Your turn: Orthodont</h2>
+<p class="lead muted">Do boys and girls grow at a different rate?</p>
+
+---
+
+## Exercise
+
+`nlme::Orthodont`: distance (mm) from the pituitary to the pterygomaxillary fissure in **27 children** (16 boys, 11 girls) at ages **8, 10, 12, 14** [@PotthoffRoy64].
+
+::: {.columns}
+
+::: {.column width="60%"}
+
+::: {style="font-size: 0.8em"}
+1. Spaghetti plot by `Sex` and profile means
+2. Random intercept vs intercept + slope, with `distance ~ age_c * Sex`. Which one?
+3. `emmeans`: boys vs girls at 8 and at 14.
+4. `emtrends`: growth (mm/year) by sex. Different?
+5. `ggpredict()`: plot both curves.
+6. Bootstrap CI for the SD of the slopes.
+:::
+
+:::
+
+::: {.column width="40%"}
+
+```{r}
+#| label: ortho-start
+#| eval: false
+#| echo: false
+ortho <- as_tibble(nlme::Orthodont) |>
+  mutate(
+    Subject = factor(as.character(Subject)),
+    age_c = age - 8)  # 0 = first visit
+
+o1 <- lmer(distance ~ age_c * Sex +
+             (1 | Subject), data = ortho)
+o2 <- lmer(distance ~ age_c * Sex +
+             (1 + age_c | Subject),
+           data = ortho)
+anova(o1, o2)
+
+emmeans(o2, ~ Sex | age_c,
+        at = list(age_c = c(0, 6))) |> pairs()
+emtrends(o2, ~ Sex, var = "age_c") |> pairs()
+```
+
+:::
+
+:::
+
+
+
+
+---
+
+## References {.scrollable}
+
+
+
+::: {#refs}
+:::
+
+<!-- Also: @FLW11 (Ch. 8), @Batesetal15, @Kuznetsovaetal17, @HalekohHojsgaard14, @PinheiroBates00. -->
