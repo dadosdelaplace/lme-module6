@@ -1,0 +1,176 @@
+/*-- scss:defaults --*/
+
+// ── Fonts (loaded via fonts.html / include-in-header) ──────────────────
+$font-family-sans-serif: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !default;
+$presentation-heading-font: "DM Sans", "Inter", sans-serif !default;
+$font-family-monospace: "IBM Plex Mono", ui-monospace, monospace !default;
+
+// ── Palette ────────────────────────────────────────────────────────────
+$ink:      #1d2b30;   // headings / dark
+$paper:    #ffffff;
+$faint:    #f7f6f3;   // panel background
+$fact:     #2a9d8f;   // observed / treated  (solid)
+$counter:  #e76f51;   // the other world / untreated
+$ghost:    #c98a14;   // unobserved counterfactual "?"
+$muted:    #6b7280;
+$rule:     #e6e3dd;
+
+// ── reveal.js variable overrides ───────────────────────────────────────
+$body-bg: $paper;
+$body-color: $ink;
+$link-color: $fact;
+$link-color-hover: darken($fact, 10%);
+$selection-bg: rgba($fact, .22);
+$selection-color: $ink;
+
+$presentation-heading-color: $ink;
+$presentation-heading-font-weight: 600;
+$presentation-font-size-root: 31px;
+$presentation-h1-font-size: 2em;
+$presentation-h2-font-size: 1.45em;
+$presentation-h3-font-size: 1.15em;
+$code-block-font-size: .8em;
+
+
+/*-- scss:rules --*/
+
+#title-slide .title {
+  font-size: 2.7em;     // sube/baja este valor
+  line-height: 1.05;
+}
+#title-slide .subtitle {
+  font-size: 1.15em;
+  color: $muted;
+}
+#title-slide .author,
+#title-slide .quarto-title-authors {
+  font-size: 0.9em;
+}
+
+.reveal {
+  font-family: $font-family-sans-serif;
+  letter-spacing: -0.005em;
+}
+
+.reveal h1, .reveal h2, .reveal h3 {
+  font-family: $presentation-heading-font;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.reveal h2 {
+  border-bottom: 3px solid $fact;
+  padding-bottom: .18em;
+  margin-bottom: .55em;
+  display: inline-block;
+}
+
+.reveal h3 { color: $muted; font-weight: 500; }
+
+.reveal a { text-decoration: none; border-bottom: 1px solid rgba($fact,.4); }
+
+.reveal strong { color: $ink; font-weight: 600; }
+.reveal em { color: $muted; font-style: italic; }
+
+// ── Section dividers (the 1–4 sequence) ────────────────────────────────
+.reveal section.divider { text-align: left; }
+.reveal .eyebrow {
+  font-family: $font-family-monospace;
+  font-size: .55em;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: $fact;
+  font-weight: 500;
+}
+.reveal .bignum {
+  font-family: $presentation-heading-font;
+  font-weight: 700;
+  font-size: 4.4em;
+  line-height: 1;
+  color: $ink;
+  margin: .05em 0 .1em;
+}
+.reveal .divider h2 {
+  border: none;
+  font-size: 1.7em;
+  display: block;
+  margin: 0;
+}
+
+// ── Factual / counterfactual identity ──────────────────────────────────
+.reveal .fact     { color: $fact;    font-weight: 600; }
+.reveal .counter  { color: $counter; font-weight: 600; }
+.reveal .ghost    { color: $ghost;   font-weight: 700; }
+.reveal .muted    { color: $muted; }
+
+.reveal .lead {
+  font-size: 1.19em;
+  line-height: 1.45;
+  color: $ink;
+}
+.reveal .punch {
+  font-family: $presentation-heading-font;
+  font-weight: 700;
+  font-size: 1.55em;
+  line-height: 1.2;
+  color: $ink;
+}
+.reveal .punch .fact { color: $fact; }
+.reveal .punch .counter { color: $counter; }
+
+.reveal .note {
+  font-size: .72em;
+  color: $muted;
+  border-left: 3px solid $rule;
+  padding-left: .7em;
+  margin-top: .6em;
+}
+
+.reveal .keybox {
+  background: $faint;
+  border: 1px solid $rule;
+  border-left: 4px solid $fact;
+  border-radius: 6px;
+  padding: .55em .85em;
+  font-size: .92em;
+}
+
+// ── Data tables (the mono "data voice") ────────────────────────────────
+.reveal table.cf {
+  font-family: $font-family-monospace;
+  font-size: .74em;
+  margin: .3em auto;
+  border-collapse: collapse;
+}
+.reveal table.cf th {
+  font-family: $presentation-heading-font;
+  font-weight: 600;
+  color: $ink;
+  border-bottom: 2px solid $ink;
+  padding: 7px 16px;
+}
+.reveal table.cf td {
+  padding: 6px 16px;
+  text-align: center;
+  border-bottom: 1px solid $rule;
+}
+.reveal table.cf th.obs  { color: $fact; }
+.reveal table.cf th.cnt  { color: $counter; }
+.reveal table.cf td.t { color: $fact; font-weight: 600; }
+.reveal table.cf td.u { color: $counter; font-weight: 600; }
+.reveal table.cf td.q { color: $ghost; font-weight: 700; }
+.reveal table.cf .colsplit { border-left: 2px dashed $ghost; }
+
+// ── The triangle / population schematic ────────────────────────────────
+.reveal .schematic { text-align: center; margin-top: .4em; }
+.reveal .schematic .caption { font-size: .7em; color: $muted; margin-top: .3em; }
+
+// math a touch larger
+.reveal .math, .reveal mjx-container { font-size: 1.02em; }
+
+// tighten default lists, room to breathe
+.reveal ul { line-height: 1.5; }
+.reveal section { line-height: 1.4; }
+
+// slide number discreet
+.reveal .slide-number { background: transparent; color: $muted; font-family: $font-family-monospace; font-size: .55em; }

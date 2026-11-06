@@ -1,0 +1,17 @@
+/* Columns always start on a new line below the (inline-block) h2 title */
+.reveal .columns {
+  display: flex;
+  width: 100%;
+}
+.reveal .columns > .column {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+.reveal .columns > .column + .column {
+  padding-left: 0.8em;
+}
+
+/* Smaller tables inside a wrapper */
+.reveal .smalltab {
+  font-size: 0.78em;
+}
