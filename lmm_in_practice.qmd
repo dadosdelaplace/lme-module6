@@ -19,6 +19,7 @@ format:
     history: false
     progress: true
     chalkboard: false
+    embed-resources: true
     l"#1d2b30"-external-newwindow: true
 execute:
   echo: true
@@ -2721,53 +2722,86 @@ Thin lines: each chick's curve, $X\hat\beta + Z\hat b_i$. Thick line: each diet'
 
 ---
 
-## Exercise
+## Exercise · Orthodont (I): look and model
 
 `nlme::Orthodont`: distance (mm) from the pituitary to the pterygomaxillary fissure in **27 children** (16 boys, 11 girls) at ages **8, 10, 12, 14** [@PotthoffRoy64].
 
 ::: {.columns}
 
-::: {.column width="60%"}
+::: {.column width="58%"}
 
-::: {style="font-size: 0.8em"}
-1. Spaghetti plot by `Sex` and profile means
-2. Random intercept vs intercept + slope, with `distance ~ age_c * Sex`. Which one?
-3. `emmeans`: boys vs girls at 8 and at 14.
-4. `emtrends`: growth (mm/year) by sex. Different?
-5. `ggpredict()`: plot both curves.
-6. Bootstrap CI for the SD of the slopes.
+::: {style="font-size: 0.68em"}
+**A · Look first**
+
+1. How many children, how many measurements each? Any missing visit? How does that compare with `ChickWeight`?
+2. **Spaghetti plot**, one panel per `Sex`. Do children start at different distances? Do they grow at different rates? Is there a child that looks **unusual**?
+3. **Mean profile ± 2 SE** by sex. Line or curve? Does the boy–girl gap **grow with age**?
+
+**B · Model**
+
+4. Fit `o1` (random intercept) and `o2` (intercept + slope) with `distance ~ age_c * Sex`. Compare with `anova()` and AIC. Which one do you keep? Does it agree with the spaghetti plot?
+5. Why `age_c = age - 8`? What do `(Intercept)` and `SexFemale` mean with `age` and with `age_c`?
 :::
 
 :::
 
-::: {.column width="40%"}
+::: {.column width="42%"}
+
+::: {style="font-size: 0.62em"}
 
 ```{r}
 #| label: ortho-start
 #| eval: false
-#| echo: false
 ortho <- as_tibble(nlme::Orthodont) |>
-  mutate(
-    Subject = factor(as.character(Subject)),
-    age_c = age - 8)  # 0 = first visit
-
-o1 <- lmer(distance ~ age_c * Sex +
-             (1 | Subject), data = ortho)
-o2 <- lmer(distance ~ age_c * Sex +
-             (1 + age_c | Subject),
-           data = ortho)
-anova(o1, o2)
-
-emmeans(o2, ~ Sex | age_c,
-        at = list(age_c = c(0, 6))) |> pairs()
-emtrends(o2, ~ Sex, var = "age_c") |> pairs()
+  mutate(Subject = factor(as.character(Subject)),
+         age_c = age - 8)  # 0 = first visit
 ```
 
 :::
 
+::: {.note}
+`Sex` has `Male` as the **first level**: boys are the reference.
+:::
+
+:::
+
 :::
 
 
+
+---
+
+## Exercise · Orthodont (II): read and answer
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.68em"}
+**C · Read the model by hand** (the one you kept)
+
+6. With `fixef()` only: expected distance of a **boy** and a **girl** at **8** and at **14**? Growth (mm/year) of each sex?
+7. `VarCorr()`: how much do children of the same sex differ at age 8? Which fraction of the variance is **between children** (ICC)?
+
+**D · Answer and inference with `emmeans`**
+
+8. Boys vs girls at **8** and at **14**. Is the gap significant at each age?
+9. `emtrends`: growth (mm/year) by sex. Do boys grow faster? 
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.68em"}
+10. **Difference of differences**: how much more do boys grow from 8 to 14 than girls? Link it to 9 and to `age_c:SexFemale`.
+11. `ggpredict()`: both population curves with 95% CI, raw data underneath, x-axis in real **age**.
+
+:::
+
+:::
+
+:::
 
 
 ---

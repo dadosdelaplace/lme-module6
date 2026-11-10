@@ -1,0 +1,819 @@
+---
+title: "Orthodont: solutions"
+subtitle: "Linear Mixed Models in Practice · PHTH 7440 · Northeastern University"
+author: "Javier Álvarez Liébana"
+format:
+  revealjs:
+    theme: [default, theme.scss]
+    css: extra.css
+    bibliography: references.bib
+    link-citations: true
+    include-in-header: fonts.html
+    slide-number: c/t
+    width: 1280
+    height: 760
+    margin: 0.08
+    center-title-slide: true
+    transition: fade
+    transition-speed: fast
+    history: false
+    progress: true
+    chalkboard: false
+    embed-resources: true
+    link-external-newwindow: true
+execute:
+  echo: true
+  warning: false
+  message: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    fig-dpi: 150
+    fig-width: 10
+    fig-height: 5
+    out-width: "100%"
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| cache: false
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(ggeffects)
+library(performance)
+library(pbkrtest)
+
+options(width = 72, digits = 4)
+
+# palette from the slide theme
+ink <- "#1d2b30"; fact <- "#2a9d8f"; counter <- "#e76f51"; ghost <- "#c98a14"; muted <- "#6b7280"
+pal_sex <- c(Male = fact, Female = counter)
+
+theme_set(
+  theme_minimal(base_size = 15) +
+    theme(panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          plot.title = element_text(face = "bold", color = ink),
+          strip.text = element_text(face = "bold"))
+)
+```
+
+## The data
+
+`nlme::Orthodont`: distance (mm) from the pituitary to the pterygomaxillary fissure in **27 children** (16 boys, 11 girls) at ages **8, 10, 12, 14** [@PotthoffRoy64].
+
+::: {style="font-size: 0.9em"}
+
+```{r}
+#| label: data
+ortho <- as_tibble(nlme::Orthodont) |>
+  mutate(Subject = factor(as.character(Subject)),  # unordered id
+         age_c = age - 8)                          # 0 = first visit
+ortho
+```
+
+:::
+
+::: {.note}
+As with `Chick`, `Subject` comes as an **ordered** factor: convert it. `Sex` has levels `Male`, `Female`: **boys are the reference**.
+:::
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Part A · Look first</p>
+<p class="bignum">A</p>
+<h2>Questions 1–3</h2>
+<p class="lead muted">Design, individual curves, mean profiles.</p>
+
+---
+
+## 1. How many children, how many measurements?
+
+::: {.columns}
+
+::: {.column width="60%"}
+
+::: {style="font-size: 0.8em"}
+
+```{r}
+#| label: q1-count
+ortho |>
+  summarise(children = n_distinct(Subject),
+            measurements = n(), .by = Sex)
+```
+
+```{r}
+#| label: q1-visits
+ortho |>
+  count(Subject, name = "visits") |>
+  count(visits, name = "children")
+```
+
+:::
+:::
+
+::: {.column width="40%"}
+
+::: {.incremental}
+- **27 children**, **108 measurements**: every child has the **4 visits**.
+- **Balanced** (same ages for everybody), **complete** (no drop-out), **equally spaced**.
+- Opposite to `ChickWeight` (unbalanced, drop-out, 12 times).
+:::
+
+
+
+:::
+
+:::
+
+---
+
+## 2. Spaghetti plot: the random part
+
+::: {.columns}
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.53em"}
+
+```{r}
+#| fig-height: 5.2
+#| fig-width: 7
+ggplot(ortho, aes(age, distance, group = Subject, color = Sex)) +
+  geom_line(alpha = .6) +
+  geom_point(alpha = .6, size = 1.2) +
+  stat_summary(aes(group = 1), fun = mean, geom = "line", color = "#1d2b30", linewidth = 1.6) +
+  stat_summary(aes(group = 1), fun = mean, geom = "point", color = "#1d2b30", size = 2.5) +
+  facet_wrap(~ Sex) +
+  scale_color_manual(values = c(Male = "#2a9d8f", Female = "#e76f51"), guide = "none") +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "distance (mm)")
+```
+
+:::
+
+:::
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.62em"}
+
+**What we see → what it implies**
+
+::: {.incremental}
+- Each child **stays high or low** across visits (rarely cross) → measurements of a child are **correlated (not independent)**: a mixed model, not `lm()`.
+- Children **start at very different intercepts** (≈ 17–28 mm at age 8), even within a sex → maybe each child its own level (random intercept): `(1 | Subject)`.
+- Within a sex, lines are **roughly parallel** → maybe each child does not need its own rate (no random slope). The spread **does not fan out** with age → if children differ in rate, not by much.
+:::
+
+
+:::
+
+::: {.fragment .keybox}
+The spaghetti plot is about **each child vs its group mean** (black line): it decides **ONLY the random part**.
+:::
+
+:::
+
+:::
+
+
+---
+
+## 3. Mean profiles: the fixed part
+
+::: {.columns}
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.55em"}
+
+
+```{r}
+#| label: q3-means
+#| fig-height: 5.2
+#| fig-width: 7
+prof <- ortho |>
+  summarise(m = mean(distance), se = sd(distance) / sqrt(n()),
+            .by = c(Sex, age))
+
+ggplot(prof, aes(age, m, color = Sex)) +
+  geom_line(linewidth = 1) +
+  geom_pointrange(aes(ymin = m - 2 * se, ymax = m + 2 * se),
+                  position = position_dodge(.3), size = .4) +
+  scale_color_manual(values = c(Male = "#2a9d8f", Female = "#e76f51")) +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "mean distance (mm) ± 2 SE")
+```
+
+:::
+
+:::
+
+::: {.column width="45%"}
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: q3-gap
+prof |>
+  select(Sex, age, m) |>
+  pivot_wider(names_from = Sex, values_from = m) |>
+  mutate(gap = Male - Female)
+```
+
+:::
+
+::: {style="font-size: 0.62em"}
+
+**What we see → what it implies**
+
+::: {.incremental}
+- Means rise in a **straight line** and **changes by age** → `age_c` as fixed effect (linear, no `I(age_c^2)`).
+- Boys **above** girls at every age → `Sex` as fixed effect
+- The gap **widens** (`r round(diff(rev(prof$m[prof$age == 8])), 1)` → `r round(diff(rev(prof$m[prof$age == 14])), 1)` mm): lines **not parallel** → a different **mean** rate for boys and girls: may exists interaction `age_c:Sex` (the rate depends on sex)
+:::
+
+:::
+
+:::
+
+:::
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Part B · Model</p>
+<p class="bignum">B</p>
+<h2>Questions 4–5</h2>
+<p class="lead muted">Random intercept or intercept + slope? And why centre age?</p>
+
+
+---
+
+## 4. Random intercept vs intercept + slope
+
+::: {style="font-size: 0.75em"}
+
+```{r}
+o1 <- lmer(distance ~ age_c * Sex + (1 | Subject), data = ortho) # random intercept
+o1_add <- lmer(distance ~ age_c + Sex + (1 | Subject), data = ortho) 
+o2 <- lmer(distance ~ age_c * Sex + (1 + age_c | Subject), data = ortho) # random intercept
+o2_add <- lmer(distance ~ age_c + Sex + (1 + age_c | Subject), data = ortho) # random intercept
+```
+
+:::
+
+random part: **is the random slope needed?**
+
+```{r}
+anova(o1, o2) # random part: is the random slope needed?
+```
+
+Answer: **no, including random slope does not improve enough**
+
+---
+
+## 4. Random intercept vs intercept + slope
+
+::: {style="font-size: 0.75em"}
+
+
+```{r}
+#| label: q4-fit
+o1 <- lmer(distance ~ age_c * Sex + (1 | Subject), data = ortho) # random intercept
+o1_add <- lmer(distance ~ age_c + Sex + (1 | Subject), data = ortho) 
+o2 <- lmer(distance ~ age_c * Sex + (1 + age_c | Subject), data = ortho) # random intercept
+o2_add <- lmer(distance ~ age_c + Sex + (1 + age_c | Subject), data = ortho) # random intercept
+```
+
+:::
+
+**Is the interaction needed?**
+
+```{r}
+anova(o1_add, o1) # fixed part: is age_c:Sex needed?
+```
+
+Answer: Yes
+
+* `age_c + Sex`: **parallel lines**: same growth rate, constant boy–girl gap.
+* `age_c * Sex` = `age_c + Sex + age_c:Sex`: **each sex its own slope** (`age_c:SexFemale` is the difference in growth rate, so the gap changes with age)
+
+
+::: {.keybox}
+It agrees with the plot: different starts, roughly parallel lines within each sex, but different growth rates for each sex.
+:::
+
+---
+
+## 4. Final model
+
+::: {style="font-size: 0.55em"}
+
+
+```{r}
+o1 <- lmer(distance ~ age_c * Sex + (1 | Subject), data = ortho)
+o1
+```
+
+:::
+
+::: {style="font-size: 0.67em"}
+
+
+$$
+\texttt{distance} \sim \texttt{age_c * Sex} + \texttt{(1  | Subject)}
+$$
+
+| Term | What it says | Seen in | Parameter |
+|---|---|---|---|
+| `(Intercept)` | mean distance of **boys at age 8** (reference) | mean profiles: where the boys' line starts | $\beta_0$ |
+| `age_c` | distance grows **linearly** with age | mean profiles: straight lines | $\beta_1$ |
+| `SexFemale` | boys and girls differ **at age 8** (female - reference) | mean profiles: boys above | $\beta_2$ |
+| `age_c:SexFemale  ` | boys and girls grow at a different **mean rate** | mean profiles: gap widens | $\beta_3$ |
+
+
+:::
+
+
+---
+
+## 5. Why `age_c = age - 8`?
+
+::: {.lead}
+Same model, two ways of measuring age. Only the **meaning** of `(Intercept)` and `SexFemale` changes.
+:::
+
+::: {style="font-size: 0.75em"}
+
+| | with `age` | with `age_c = age - 8` |
+|---|---|---|
+| "time 0" is | **age 0** (a newborn) | **age 8** (first visit) |
+| `(Intercept)` = boys at time 0 | `r round(fixef(o1)[1] - 8 * fixef(o1)[2], 2)` mm | `r round(fixef(o1)[1], 2)` mm |
+| `SexFemale` = girl − boy at time 0 | `r round(fixef(o1)[3] - 8 * fixef(o1)[4], 2)` mm | `r round(fixef(o1)[3], 2)` mm |
+| `age`/`age_c`, `…:SexFemale` (slopes) | `r round(fixef(o1)[2], 3)`, `r round(fixef(o1)[4], 3)` | `r round(fixef(o1)[2], 3)`, `r round(fixef(o1)[4], 3)` |
+
+:::
+
+::: {.keybox}
+With `age`, the model says girls are **`r round(fixef(o1)[3] - 8 * fixef(o1)[4], 1)` mm bigger at birth**: an extrapolation 8 years outside the data, with the **opposite sign** to what we see. With `age_c`, both numbers describe the first visit, where we have data.
+:::
+
+::: {.note}
+Values with `age` obtained from `o1` by moving the origin: intercept − 8 · slope. Fitting `age * Sex` gives exactly the same numbers.
+:::
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Part C · Read the model</p>
+<p class="bignum">C</p>
+<h2>Questions 6–7</h2>
+<p class="lead muted">From `o1`, by hand.</p>
+
+---
+
+## 6. By hand from `fixef(o1)`
+
+::: {style="font-size: 0.7em"}
+
+```{r}
+#| label: q6-fixef
+fixef(o1)
+```
+
+```{r}
+#| echo: false
+b <- fixef(o1)
+```
+
+:::
+
+::: {.note}
+Boys are the reference: their values are `(Intercept)` and `age_c` alone; girls add `SexFemale` and `age_c:SexFemale`.
+:::
+
+
+::: {style="font-size: 0.65em"}
+
+| | **Age 8** (`age_c` = 0) | **Age 14** (`age_c` = 6) | **mm/year** |
+|---|---|---|---|
+| **Boys** | $\beta_0$ = `r round(b[1], 3)` | $\beta_0 + 6\beta_1$ = `r round(b[1] + 6 * b[2], 3)` | $\beta_1$ = `r round(b[2], 3)` |
+| **Girls** | $\beta_0 + \beta_2$ = `r round(b[1] + b[3], 3)` | $\beta_0 + \beta_2 + 6(\beta_1 + \beta_3)$ = `r round(b[1] + b[3] + 6 * (b[2] + b[4]), 2)` | $\beta_1 + \beta_3$ = `r round(b[2] + b[4], 3)` |
+| **Gap** (boy − girl) | $-\beta_2$ = `r round(-b[3], 3)` | $-(\beta_2 + 6\beta_3)$ = `r round(-(b[3] + 6 * b[4]), 3)` | $-\beta_3$ = `r round(-b[4], 3)` |
+
+:::
+
+::: {.keybox}
+Boys grow ≈ **`r round(b[2], 2)` mm/year**, girls ≈ **`r round(b[2] + b[4], 2)`**. The gap (boy − girl) grows from **`r round(-b[3], 1)`** to **`r round(-(b[3] + 6 * b[4]), 1)` mm**.
+:::
+
+
+
+
+---
+
+## 7. How much do children differ? `VarCorr(o1)`
+
+::: {.columns}
+
+::: {.column width="45%"}
+
+```{r}
+#| label: q7-vc
+VarCorr(o1)
+icc(o1)
+```
+
+```{r}
+#| label: q7-objects
+#| include: false
+vc <- as.data.frame(VarCorr(o1))
+s_b <- vc$sdcor[1]; s_e <- vc$sdcor[2]
+```
+
+:::
+
+::: {.column width="55%"}
+
+::: {style="font-size: 0.85em"}
+
+::: {.incremental}
+- **SD of intercepts** ≈ **`r round(s_b, 2)` mm**: two children of the same sex differ, at 8, by about ± `r round(2 * s_b, 1)` mm (95%) around their sex mean.
+- **Residual SD** ≈ `r round(s_e, 2)` mm: measurement noise + deviations from each child's line. Even if we knew each child's line, its measurements would still miss it by about **± 1.4 mm**.
+- **ICC** = $\frac{`r round(s_b, 2)`^2}{`r round(s_b, 2)`^2 + `r round(s_e, 2)`^2}$ ≈ **`r round(s_b^2 / (s_b^2 + s_e^2), 2)`**: ≈ `r round(100 * s_b^2 / (s_b^2 + s_e^2))`% of the variance (beyond sex and age) is **between children**.
+:::
+
+::: {.fragment .note}
+With a random intercept only, the ICC is also the **correlation between any two visits** of the same child (compound symmetry).
+:::
+
+:::
+
+:::
+
+:::
+
+::: {.fragment .keybox}
+**Consequences.** Two visits of the same child correlate ≈ 0.63: 108 measurements are worth much less than 108 independent points (`lm()` would give too-small SEs). Comparisons **between children** (boys vs girls at 8) are less precise than comparisons **within children** (growth rates).
+:::
+
+
+# {.divider background-color="#f7f6f3"}
+
+<p class="eyebrow">Part D · Answer with emmeans</p>
+<p class="bignum">D</p>
+<h2>Questions 8–11</h2>
+<p class="lead muted">Same numbers as by hand, now with SEs, CIs and p-values.</p>
+
+---
+
+## 8. Boys vs girls at 8 and at 14
+
+::: {style="font-size: 0.65em"}
+
+```{r}
+#| label: q8-emm
+emm <- emmeans(o1, ~ Sex | age_c, at = list(age_c = c(0, 6)))
+emm
+pairs(emm)
+```
+
+:::
+
+```{r}
+#| label: q8-objects
+#| include: false
+pr <- as_tibble(pairs(emm))
+```
+
+::: {style="font-size: 0.8em"}
+
+::: {.keybox}
+At 8: gap **`r round(pr$estimate[1], 2)` mm**, p = `r round(pr$p.value[1], 2)`. At 14: **`r round(pr$estimate[2], 2)` mm**, p `r format.pval(pr$p.value[2], digits = 1, eps = 0.001)`. Boys and girls are not distinguishable at 8, but clearly different at 14.
+:::
+
+:::
+
+::: {.note}
+p = `r round(pr$p.value[1], 2)` at 8 does **not** mean "same distance": look at the CI with `confint(pairs(emm))`. With 27 children, a 1–2 mm gap is hard to detect.
+:::
+
+---
+
+## 9. Growth by sex: `emtrends`
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.65em"}
+
+```{r}
+#| label: q9-o1
+tr1 <- emtrends(o1, ~ Sex, var = "age_c")
+tr1
+pairs(tr1)
+```
+
+```{r}
+#| label: q9-objects
+#| include: false
+t1 <- as_tibble(tr1); p1 <- as_tibble(pairs(tr1))
+```
+
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {.incremental}
+- **Boys** grow **`r round(t1$age_c.trend[1], 2)` mm/year** (95% CI `r round(t1$lower.CL[1], 2)`–`r round(t1$upper.CL[1], 2)`).
+- **Girls** grow **`r round(t1$age_c.trend[2], 2)` mm/year** (95% CI `r round(t1$lower.CL[2], 2)`–`r round(t1$upper.CL[2], 2)`).
+- Boys grow **`r round(p1$estimate, 2)` mm/year faster** (p = `r round(p1$p.value, 3)`).
+:::
+
+::: {.fragment .keybox}
+Yes, boys grow faster: over the 6 years, ≈ `r round(6 * p1$estimate, 1)` mm more. Same numbers as by hand (question 6), now with SEs and a p-value.
+:::
+
+:::
+
+:::
+
+---
+
+
+## 10. Difference of differences
+
+::: {style="font-size: 0.65em"}
+
+```{r}
+#| label: q10-did
+emm_8_14 <- emmeans(o1, ~ Sex * age_c, at = list(age_c = c(0, 6)))
+did <- contrast(emm_8_14, interaction = c(Sex = "pairwise", age_c = "revpairwise"))
+did
+```
+
+:::
+
+```{r}
+#| label: q10-objects
+#| include: false
+d <- as_tibble(did)
+```
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {.keybox}
+Boys gain **`r round(d$estimate, 2)` mm more** than girls from 8 to 14 (p = `r round(d$p.value, 3)`).
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.8em"}
+
+::: {.incremental}
+- = gap at 14 − gap at 8 = `r round(pr$estimate[2], 2)` − `r round(pr$estimate[1], 2)` (question 8).
+- = 6 years × `r round(p1$estimate, 3)` mm/year (question 9).
+- = −6 × `age_c:SexFemale`: **same t and p** as that coefficient.
+:::
+
+:::
+
+:::
+
+:::
+
+::: {.fragment .note}
+With a straight line, "do they grow differently?", "does the gap change?" and "is there an interaction?" are **the same question**.
+:::
+
+---
+
+## 11. Population curves with `ggpredict()`
+
+::: {style="font-size: 0.55em"}
+
+```{r}
+#| label: q11-gg
+#| fig-height: 4
+pred <- ggpredict(o1, terms = c("age_c [0:6 by=0.5]", "Sex")) |>
+  as_tibble() |>
+  mutate(age = x + 8, Sex = group)
+
+ggplot(pred, aes(age, predicted, color = Sex, fill = Sex)) +
+  geom_line(data = ortho, aes(y = distance, group = Subject), alpha = .25, linewidth = .5) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2, color = NA) +
+  geom_line(linewidth = 1.6) +
+  scale_color_manual(values = pal_sex) + scale_fill_manual(values = pal_sex) +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "distance (mm)")
+```
+
+:::
+
+::: {.note}
+Thick lines: $X\hat\beta$, the **typical** boy and girl (marginal). Bands: 95% CI of the **mean**, not the range of children (the thin lines spread much wider). The bands separate as age increases: the result of question 8, seen as a picture.
+:::
+
+---
+
+## 11b. The gap, age by age
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: q11-gap
+#| fig-height: 3.6
+gap <- emmeans(o1, ~ Sex | age_c, at = list(age_c = seq(0, 6, by = 0.5))) |>
+  pairs() |>
+  confint() |>
+  as_tibble() |>
+  mutate(age = age_c + 8)
+
+ggplot(gap, aes(age, estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = muted) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), fill = fact, alpha = .2) +
+  geom_line(color = fact, linewidth = 1.3) +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "boy − girl distance (mm), 95% CI")
+```
+
+:::
+
+::: {.keybox}
+The **effect of sex** as a function of age: ≈ `r round(gap$estimate[1], 1)` mm at 8 (band crosses 0), ≈ `r round(gap$estimate[nrow(gap)], 1)` mm at 14. The band leaves 0 at about age **`r gap$age[which(gap$lower.CL > 0)[1]]`**. The slope of this line is `age_c:Sex`.
+:::
+
+::: {.note}
+Pointwise 95% CIs: good for describing **from when** boys and girls differ, not a formal test at every age.
+:::
+
+---
+
+## 11c. Growth rates by sex
+
+::: {.columns}
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: q11-rates
+#| fig-height: 3.8
+#| fig-width: 6
+as_tibble(tr1) |>
+  ggplot(aes(age_c.trend, Sex, color = Sex)) +
+  geom_pointrange(aes(xmin = lower.CL, xmax = upper.CL),
+                  size = .8, linewidth = 1.2) +
+  scale_color_manual(values = pal_sex, guide = "none") +
+  labs(x = "growth rate (mm/year), 95% CI", y = NULL)
+```
+
+:::
+
+:::
+
+::: {.column width="50%"}
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: q11-rates-diff
+#| fig-height: 3.8
+#| fig-width: 6
+confint(pairs(tr1)) |>
+  as_tibble() |>
+  ggplot(aes(estimate, contrast)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = muted) +
+  geom_pointrange(aes(xmin = lower.CL, xmax = upper.CL),
+                  color = counter, size = .8, linewidth = 1.2) +
+  labs(x = "difference in growth rate (mm/year), 95% CI", y = NULL)
+```
+
+:::
+
+:::
+
+:::
+
+::: {.keybox}
+Left: each sex's rate. Right: the **effect** (boys − girls), its CI does not cross 0 → boys grow faster. The left CIs overlap a bit, yet the difference is clear: compare **differences**, not overlapping intervals.
+:::
+
+---
+
+## 11d. Each child vs its sex
+
+::: {style="font-size: 0.6em"}
+
+```{r}
+#| label: q11-cond
+#| fig-height: 3.8
+ortho |>
+  mutate(child_line = predict(o1),                 # Xβ + Zb_i (conditional)
+         sex_line   = predict(o1, re.form = NA)) |> # Xβ       (marginal)
+  ggplot(aes(age, color = Sex)) +
+  geom_point(aes(y = distance), alpha = .3, size = 1.2) +
+  geom_line(aes(y = child_line, group = Subject), alpha = .5) +
+  geom_line(aes(y = sex_line), color = ink, linewidth = 1.6) +
+  facet_wrap(~ Sex) +
+  scale_color_manual(values = pal_sex, guide = "none") +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "distance (mm)")
+```
+
+:::
+
+::: {.keybox}
+Thin lines: each child's fitted line, $X\hat\beta + Z\hat b_i$. Thick line: the sex's line, $X\hat\beta$. With `o1` children's lines are **parallel** to their sex's line (own level, common rate): exactly what the random intercept assumes.
+:::
+
+---
+
+## 11e. Effects plot · each sex across ages
+
+::: {style="font-size: 0.5em"}
+
+```{r}
+#| label: eff-sex-age
+#| fig-height: 3
+emm_grid <- emmeans(o1, ~ Sex | age_c, at = list(age_c = c(0, 2, 4, 6))) |>
+  as_tibble() |>
+  mutate(age = age_c + 8)
+
+ggplot(emm_grid, aes(age, emmean, color = Sex, group = Sex)) +
+  geom_line(linewidth = 1, position = position_dodge(.3)) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), position = position_dodge(.3), size = .5) +
+  scale_color_manual(values = pal_sex) +
+  scale_x_continuous(breaks = c(8, 10, 12, 14)) +
+  labs(x = "age (years)", y = "estimated mean distance (mm) ± 95% CI")
+```
+
+:::
+
+::: {style="font-size: 0.8em"}
+
+::: {.keybox}
+One line per sex: **how each sex grows with age**. The slope of each line is its growth rate (`emtrends`); lines that **diverge** = Sex × age interaction.
+:::
+
+:::
+
+---
+
+## 11f. Effects plot · each age across sexes
+
+::: {style="font-size: 0.5em"}
+
+```{r}
+#| label: eff-age-sex
+#| fig-height: 3.4
+ggplot(emm_grid, aes(Sex, emmean, color = factor(age), group = factor(age))) +
+  geom_line(linewidth = 1) +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL), size = .5) +
+  scale_color_viridis_d("age", end = .9) +
+  labs(x = NULL, y = "estimated mean distance (mm) ± 95% CI")
+```
+
+:::
+
+::: {style="font-size: 0.7em"}
+
+::: {.keybox}
+Same estimates, axes swapped: one line per age, **how boys and girls compare at that age**. The slope of each line is the boy − girl gap: almost flat at 8, steeper at 14 → the sex effect **grows with age**. If there were no interaction, the lines would be **parallel** in both plots.
+:::
+
+:::
+
+---
+
+## Take-home
+
+::: {style="font-size: 0.9em"}
+
+::: {.incremental}
+1. **Plot first**: different starts, parallel lines
+2. **Random intercept** is enough (`o1`): a straight line is enough too.
+3. Boys and girls start similar at 8 (gap ≈ 1.4 mm, n.s.) but **diverge**: ≈ 3.2 mm at 14.
+4. Boys grow **≈ 0.3 mm/year faster**: the slope difference, the change in the gap and the interaction coefficient are the same number.
+5. The covariance choice **does not change β̂** here, but it **changes SEs, df and p**.
+:::
+
+:::
+
+---
+
+## References {.scrollable}
+
+::: {#refs}
+:::
